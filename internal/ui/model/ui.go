@@ -2056,6 +2056,7 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 			switch {
 			case key.Matches(msg, m.keyMap.Editor.AddImage):
 				if !m.currentModelSupportsImages() {
+					cmds = append(cmds, m.imageUnsupportedWarning())
 					break
 				}
 				if cmd := m.openFilesDialog(); cmd != nil {
@@ -2064,6 +2065,7 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 
 			case key.Matches(msg, m.keyMap.Editor.PasteImage):
 				if !m.currentModelSupportsImages() {
+					cmds = append(cmds, m.imageUnsupportedWarning())
 					break
 				}
 				cmds = append(cmds, m.pasteImageFromClipboard)
@@ -2692,6 +2694,21 @@ func (m *UI) FullHelp() [][]key.Binding {
 	)
 
 	return binds
+}
+
+// imageUnsupportedWarning returns a command that surfaces, in the status
+// bar, why image input is unavailable for the active coder model. The
+// caller is expected to have already checked currentModelSupportsImages.
+func (m *UI) imageUnsupportedWarning() tea.Cmd {
+	name := "The current model"
+	if cfg := m.com.Config(); cfg != nil {
+		if agentCfg, ok := cfg.Agents[config.AgentCoder]; ok {
+			if model := cfg.GetModelByType(agentCfg.Model); model != nil && model.Name != "" {
+				name = model.Name
+			}
+		}
+	}
+	return util.ReportWarn(name + " doesn't support image input")
 }
 
 func (m *UI) currentModelSupportsImages() bool {
