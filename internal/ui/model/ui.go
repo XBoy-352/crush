@@ -4606,6 +4606,7 @@ func (m *UI) handlePermissionNotification(notification permission.PermissionNoti
 		if perm, ok := d.(*dialog.Permissions); ok && perm.ToolCallID() == notification.ToolCallID {
 			if notification.Granted && perm.ToolName() == agenttools.ExitPlanModeToolName {
 				m.setEditorPrompt(m.yoloModeCached())
+				m.planCache.set(false)
 				cmd = util.ReportInfo("Plan approved — plan mode off")
 			}
 			m.dialog.CloseDialog(dialog.PermissionsID)

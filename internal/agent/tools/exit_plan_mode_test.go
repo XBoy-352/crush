@@ -14,12 +14,12 @@ import (
 
 type exitPlanModePerms struct {
 	*pubsub.Broker[permission.PermissionRequest]
-	planMode  bool
-	allow     bool
-	setCalls  int
-	lastPlan  bool
-	reqCount  int
-	lastReq   permission.CreatePermissionRequest
+	planMode bool
+	allow    bool
+	setCalls int
+	lastPlan bool
+	reqCount int
+	lastReq  permission.CreatePermissionRequest
 }
 
 func (m *exitPlanModePerms) Request(ctx context.Context, req permission.CreatePermissionRequest) (bool, error) {
@@ -28,14 +28,14 @@ func (m *exitPlanModePerms) Request(ctx context.Context, req permission.CreatePe
 	return m.allow, nil
 }
 
-func (m *exitPlanModePerms) Grant(req permission.PermissionRequest) bool  { return true }
-func (m *exitPlanModePerms) Deny(req permission.PermissionRequest) bool   { return true }
+func (m *exitPlanModePerms) Grant(req permission.PermissionRequest) bool { return true }
+func (m *exitPlanModePerms) Deny(req permission.PermissionRequest) bool  { return true }
 func (m *exitPlanModePerms) GrantPersistent(req permission.PermissionRequest) bool {
 	return true
 }
 func (m *exitPlanModePerms) AutoApproveSession(sessionID string) {}
-func (m *exitPlanModePerms) SetSkipRequests(skip bool)          {}
-func (m *exitPlanModePerms) SkipRequests() bool                 { return false }
+func (m *exitPlanModePerms) SetSkipRequests(skip bool)           {}
+func (m *exitPlanModePerms) SkipRequests() bool                  { return false }
 func (m *exitPlanModePerms) SetPlanMode(enabled bool) {
 	m.setCalls++
 	m.lastPlan = enabled
