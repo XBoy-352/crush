@@ -252,6 +252,17 @@ Decisions (do not relitigate):
    an order of magnitude more integration surface and the top executor risk.
    Plain synchronous JS with a data-parallel `parallel()` covers fan-out,
    loop-until-dry, and vote-verify, which is ~90% of the value.
+   Language: JS, not Lua (`gopher-lua`) or Starlark (`starlark-go`) —
+   all three embed equally well in Go (pure Go, sandboxed, interruptible),
+   but the script author is the LLM, so the deciding factors are model
+   fluency (JS is the best-represented language in training data; a
+   generation error wastes a whole approved workflow turn), native JSON
+   (the entire API surface is JSON-shaped; Lua tables make empty-array vs
+   object ambiguous and need a JSON lib), and idiomatic map/filter/flatMap
+   for the between-rounds data plumbing. Starlark additionally bans
+   `while`, which fights loop-until-dry. Lua's classic embedding
+   advantages (size, speed, coroutines) are irrelevant: wall-clock is LLM
+   inference and the design is synchronous-only.
 2. **`parallel()` takes an array of data objects, never closures.** A JS
    callback cannot run on a worker goroutine (single-VM-goroutine rule).
    Consequence: no `pipeline()`; multi-stage work is expressed as
