@@ -263,6 +263,13 @@ Decisions (do not relitigate):
    `while`, which fights loop-until-dry. Lua's classic embedding
    advantages (size, speed, coroutines) are irrelevant: wall-clock is LLM
    inference and the design is synchronous-only.
+   The language choice is settled for v1 but explicitly provisional: it
+   will be revisited in the project-wide performance overhaul (§10.1) if
+   goja's per-VM footprint proves to matter at scale. To keep that door
+   open, the runner package must confine all goja types to
+   `internal/agent/workflow` — nothing outside the package may import
+   goja or see a goja type in a signature (`SpawnFunc`, `Options`,
+   `Result` are already goja-free; keep it that way).
 2. **`parallel()` takes an array of data objects, never closures.** A JS
    callback cannot run on a worker goroutine (single-VM-goroutine rule).
    Consequence: no `pipeline()`; multi-stage work is expressed as
@@ -632,6 +639,26 @@ weaken the matcher.
   per-agent model/effort overrides, a phase-tree TUI, streaming progress
   events, config knobs for the caps.
 
+### 10.1 Footprint contract (project-level goal, applies here and onward)
+
+Crush's reason to exist over Claude Code and the Python-based tools is an
+extremely low memory footprint — the target is that ~100 sessions can run
+in parallel comfortably. A full project-wide performance overview and
+bug-hunting pass is planned later (better, faster, cleaner than any CLI
+tool in this space); this feature must not create work for that pass:
+
+- One goja VM per workflow call, created in `Run`, unreachable when `Run`
+  returns — never cached, never pooled, no package-level VM state. When no
+  workflow is running, the feature's steady-state memory cost is zero
+  (goja code mapped but no live runtimes).
+- Everything a run accumulates is bounded by the §4 caps (agents, logs,
+  script size); results held per-run only. No unbounded slices/maps.
+- Keep the runner small and profile-friendly: pure functions where
+  possible, no reflection beyond what goja itself does, no background
+  goroutines outside the watchdog.
+- goja stays quarantined in `internal/agent/workflow` (decision 1) so the
+  perf pass can swap the interpreter without touching callers.
+
 ## 11. Milestones
 
 - M1 — runner package + goja dep + full test suite (nothing registered;
@@ -679,4 +706,8 @@ Each milestone compiles and passes `go test ./...` independently.
     with the change).
 14. ❑ goja facts from §2.7 verified against the pinned version before the
     runner was written (note the resolved version in the M1 commit).
-15. ❑ Line numbers in §2 re-located with grep, not trusted blindly.
+15. ❑ Footprint contract (§10.1): `grep -r dop251/goja` hits only
+    `internal/agent/workflow` (+ go.mod/go.sum); no package-level `var`
+    holds a VM or run state in `workflow.go`; the only `go func` sites are
+    the watchdog and `jsParallel` workers.
+16. ❑ Line numbers in §2 re-located with grep, not trusted blindly.
