@@ -41,6 +41,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
+	"github.com/charmbracelet/crush/internal/hooks"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
@@ -183,6 +184,7 @@ type sessionAgent struct {
 	messages             message.Service
 	disableAutoSummarize bool
 	isYolo               bool
+	stopHooks            *hooks.Runner
 	notify               pubsub.Publisher[notify.Notification]
 	runComplete          pubsub.Publisher[notify.RunComplete]
 
@@ -235,11 +237,14 @@ type SessionAgentOptions struct {
 	IsSubAgent           bool
 	DisableAutoSummarize bool
 	IsYolo               bool
-	Sessions             session.Service
-	Messages             message.Service
-	Tools                []fantasy.AgentTool
-	Notify               pubsub.Publisher[notify.Notification]
-	RunComplete          pubsub.Publisher[notify.RunComplete]
+	// StopHooks fires the Stop event when a top-level turn ends. Nil for
+	// subagents or when no Stop hooks are configured.
+	StopHooks   *hooks.Runner
+	Sessions    session.Service
+	Messages    message.Service
+	Tools       []fantasy.AgentTool
+	Notify      pubsub.Publisher[notify.Notification]
+	RunComplete pubsub.Publisher[notify.RunComplete]
 }
 
 func NewSessionAgent(
@@ -256,6 +261,7 @@ func NewSessionAgent(
 		disableAutoSummarize: opts.DisableAutoSummarize,
 		tools:                csync.NewSliceFrom(opts.Tools),
 		isYolo:               opts.IsYolo,
+		stopHooks:            opts.StopHooks,
 		notify:               opts.Notify,
 		runComplete:          opts.RunComplete,
 		messageQueue:         csync.NewMap[string, []SessionAgentCall](),
@@ -542,6 +548,25 @@ func (a *sessionAgent) persistCanceledTurn(ctx context.Context, call SessionAgen
 // observes exactly one terminal event regardless of which Run branch ends
 // the turn.
 func (a *sessionAgent) publishRunComplete(ctx context.Context, call SessionAgentCall, complete notify.RunComplete) {
+	if a.stopHooks != nil {
+		outcome := "complete"
+		switch {
+		case complete.Cancelled:
+			outcome = "cancelled"
+		case complete.Error != "":
+			outcome = "error"
+		}
+		hookCtx := context.WithoutCancel(ctx)
+		if _, err := a.stopHooks.RunEvent(hookCtx, hooks.EventInput{
+			Event:     hooks.EventStop,
+			SessionID: call.SessionID,
+			Outcome:   outcome,
+			Error:     complete.Error,
+		}); err != nil {
+			slog.Warn("Stop hook error, ignoring", "error", err)
+		}
+	}
+
 	if call.OnComplete != nil {
 		call.OnComplete(complete)
 		return
