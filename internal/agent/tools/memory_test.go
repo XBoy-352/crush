@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -203,9 +204,7 @@ func TestMemoryWriteFileCountCap(t *testing.T) {
 	// Pre-fill to the limit without going through the tool so the test
 	// stays fast.
 	for i := range maxMemoryFiles {
-		name := filepath.Join(memoryDir, "m"+strings.Repeat("a", 1)+string(rune('a'+i%26))+".md")
-		// Use unique names via index.
-		name = filepath.Join(memoryDir, "m"+itoa(i)+".md")
+		name := filepath.Join(memoryDir, "m"+strconv.Itoa(i)+".md")
 		require.NoError(t, os.WriteFile(name, []byte("---\ndescription: x\n---\n\nbody"), 0o644))
 	}
 
@@ -260,16 +259,4 @@ func TestMemoryWriteInvalidAction(t *testing.T) {
 	})
 	require.True(t, resp.IsError)
 	require.Contains(t, resp.Content, "action must be save or delete")
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var digits []byte
-	for n > 0 {
-		digits = append([]byte{byte('0' + n%10)}, digits...)
-		n /= 10
-	}
-	return string(digits)
 }
