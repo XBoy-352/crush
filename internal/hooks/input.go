@@ -62,7 +62,10 @@ func BuildEventPayload(in EventInput, cwd string) []byte {
 	if in.ToolName != "" {
 		p.ToolName = in.ToolName
 	}
-	if in.ToolInput != "" {
+	// Tool events always carry tool_input, even when the raw input is
+	// empty (a zero-argument tool call): BuildPayload historically emitted
+	// {} in that case and hook scripts may rely on the field existing.
+	if in.ToolName != "" || in.ToolInput != "" {
 		toolInput := json.RawMessage(in.ToolInput)
 		if !json.Valid(toolInput) {
 			toolInput = json.RawMessage("{}")

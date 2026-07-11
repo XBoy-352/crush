@@ -162,6 +162,11 @@ func mergeHookMetadata(existing string, result hooks.AggregateResult) string {
 }
 
 func mergeHookMetadataKey(existing string, result hooks.AggregateResult, key string) string {
+	// No hooks matched this tool: leave the metadata untouched so the UI
+	// hook indicator only appears for calls a hook actually processed.
+	if result.HookCount == 0 {
+		return existing
+	}
 	meta := hooks.HookMetadata{
 		HookCount:    result.HookCount,
 		Decision:     result.Decision.String(),

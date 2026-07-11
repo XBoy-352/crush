@@ -856,3 +856,18 @@ func TestBuildEventPayload(t *testing.T) {
 		require.Equal(t, "boom", m["error"])
 	})
 }
+
+func TestBuildPayloadPreToolUseGolden(t *testing.T) {
+	t.Parallel()
+
+	// PreToolUse payloads are a compatibility surface: hook scripts parse
+	// them. These are byte-for-byte goldens; do not change the expected
+	// strings without a migration plan for existing hooks.
+	got := string(BuildPayload(EventPreToolUse, "s1", "/cwd", "bash", `{"command":"ls"}`))
+	require.Equal(t, `{"event":"PreToolUse","session_id":"s1","cwd":"/cwd","tool_name":"bash","tool_input":{"command":"ls"}}`, got)
+
+	// A zero-argument tool call has an empty raw input string; the payload
+	// still carries tool_input: {}.
+	got = string(BuildPayload(EventPreToolUse, "s1", "/cwd", "lsp_restart", ""))
+	require.Equal(t, `{"event":"PreToolUse","session_id":"s1","cwd":"/cwd","tool_name":"lsp_restart","tool_input":{}}`, got)
+}

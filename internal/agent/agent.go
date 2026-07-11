@@ -548,6 +548,11 @@ func (a *sessionAgent) persistCanceledTurn(ctx context.Context, call SessionAgen
 // observes exactly one terminal event regardless of which Run branch ends
 // the turn.
 func (a *sessionAgent) publishRunComplete(ctx context.Context, call SessionAgentCall, complete notify.RunComplete) {
+	// Known edge: on the coordinator's re-auth retry path every attempt
+	// publishes through here with an OnComplete coalescer, so Stop hooks
+	// can fire once per attempt (at most twice, and only on a 401-refresh
+	// retry). Accepted for v1 — moving the fire after the OnComplete
+	// branch would skip Stop entirely for interactive runs.
 	if a.stopHooks != nil {
 		outcome := "complete"
 		switch {
