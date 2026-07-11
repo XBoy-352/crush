@@ -1499,6 +1499,33 @@ func (m *UI) updateSessionMessage(msg message.Message) tea.Cmd {
 	return tea.Sequence(cmds...)
 }
 
+var workflowCallIDRe = regexp.MustCompile(`^(.+)-a\d+$`)
+
+func workflowBaseCallID(id string) (string, bool) {
+	m := workflowCallIDRe.FindStringSubmatch(id)
+	if len(m) == 2 {
+		return m[1], true
+	}
+	return "", false
+}
+
+func (m *UI) lookupNestedToolContainer(toolCallID string) chat.NestedToolContainer {
+	for i := 0; i < m.chat.Len(); i++ {
+		item := m.chat.MessageItem(toolCallID)
+		if item == nil {
+			continue
+		}
+		if agent, ok := item.(chat.NestedToolContainer); ok {
+			if toolMessageItem, ok := item.(chat.ToolMessageItem); ok {
+				if toolMessageItem.ToolCall().ID == toolCallID {
+					return agent
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // handleChildSessionMessage handles messages from child sessions (agent tools).
 func (m *UI) handleChildSessionMessage(event pubsub.Event[message.Message]) tea.Cmd {
 	var cmds []tea.Cmd
@@ -1516,21 +1543,11 @@ func (m *UI) handleChildSessionMessage(event pubsub.Event[message.Message]) tea.
 	}
 
 	// Find the parent agent tool item.
-	var agentItem chat.NestedToolContainer
-	for i := 0; i < m.chat.Len(); i++ {
-		item := m.chat.MessageItem(toolCallID)
-		if item == nil {
-			continue
-		}
-		if agent, ok := item.(chat.NestedToolContainer); ok {
-			if toolMessageItem, ok := item.(chat.ToolMessageItem); ok {
-				if toolMessageItem.ToolCall().ID == toolCallID {
-					// Verify this agent belongs to the correct parent message.
-					// We can't directly check parentMessageID on the item, so we trust the session parsing.
-					agentItem = agent
-					break
-				}
-			}
+	agentItem := m.lookupNestedToolContainer(toolCallID)
+
+	if agentItem == nil {
+		if base, ok := workflowBaseCallID(toolCallID); ok {
+			agentItem = m.lookupNestedToolContainer(base)
 		}
 	}
 
