@@ -733,9 +733,15 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		tools.NewExitPlanModeTool(c.permissions),
 	)
 
-	// Question tool is interactive-only and not available to sub-agents.
+// Question tool is interactive-only and not available to sub-agents.
 	if !isSubAgent && c.interactive {
 		allTools = append(allTools, tools.NewQuestionTool(c.questions))
+	}
+
+	// Memory is for the top-level coder only; sub-agents stay read-only
+	// with respect to the project memory store.
+	if !isSubAgent && !c.cfg.Config().Options.DisableMemory {
+		allTools = append(allTools, tools.NewMemoryTool(c.cfg.Config().Options.DataDirectory))
 	}
 
 	// Add LSP tools if user has configured LSPs or auto_lsp is enabled (nil or true).

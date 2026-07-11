@@ -296,6 +296,7 @@ type Options struct {
 	Debug                bool        `json:"debug,omitempty" jsonschema:"description=Enable debug logging,default=false"`
 	DebugLSP             bool        `json:"debug_lsp,omitempty" jsonschema:"description=Enable debug logging for LSP servers,default=false"`
 	DisableAutoSummarize bool        `json:"disable_auto_summarize,omitempty" jsonschema:"description=Disable automatic conversation summarization,default=false"`
+	DisableMemory        bool        `json:"disable_memory,omitempty" jsonschema:"description=Disable persistent agent memory (the memory_write tool and the memory section of the system prompt),default=false"`
 	// DataDirectory is where Crush keeps per-project state such as
 	// the SQLite database and workspace overrides. Relative paths are
 	// resolved against the working directory; absolute paths are used
@@ -771,6 +772,7 @@ func allToolNames() []string {
 		"question",
 		"sourcegraph",
 		"todos",
+		"memory_write",
 		"view",
 		"write",
 		"exit_plan_mode",
