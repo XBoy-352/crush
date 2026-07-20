@@ -265,7 +265,12 @@ func loadMemoryIndex(path string) string {
 		return string(b)
 	}
 	b = b[:maxMemoryIndexBytes]
-	for len(b) > 0 && !utf8.RuneStart(b[len(b)-1]) {
+	// Drop a trailing incomplete UTF-8 sequence so the prompt stays valid.
+	for len(b) > 0 {
+		r, size := utf8.DecodeLastRune(b)
+		if r != utf8.RuneError || size != 1 {
+			break
+		}
 		b = b[:len(b)-1]
 	}
 	return string(b) + "\n(truncated)"
