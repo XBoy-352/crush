@@ -164,6 +164,10 @@ func (w *AppWorkspace) AgentCancel(sessionID string) {
 	}
 }
 
+func (w *AppWorkspace) AgentBackgroundForegroundTools(sessionID string) int {
+	return shell.ReleaseForegroundWaits(sessionID)
+}
+
 func (w *AppWorkspace) AgentIsBusy() bool {
 	if w.app.AgentCoordinator == nil {
 		return false

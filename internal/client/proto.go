@@ -853,6 +853,26 @@ func (c *Client) CancelAgentSession(ctx context.Context, id string, sessionID st
 	return nil
 }
 
+// BackgroundAgentSessionForegroundTools releases foreground bash waits for a
+// session so those tools continue as background jobs.
+func (c *Client) BackgroundAgentSessionForegroundTools(ctx context.Context, id string, sessionID string) (int, error) {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/agent/sessions/%s/background", id, sessionID), nil, nil, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to background agent session tools: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("failed to background agent session tools: status code %d", rsp.StatusCode)
+	}
+	var result struct {
+		Released int `json:"released"`
+	}
+	if err := json.NewDecoder(rsp.Body).Decode(&result); err != nil {
+		return 0, fmt.Errorf("failed to decode background response: %w", err)
+	}
+	return result.Released, nil
+}
+
 // RevertToMessageResult describes the outcome of a revert operation.
 type RevertToMessageResult struct {
 	MessagesDeleted int      `json:"messages_deleted"`

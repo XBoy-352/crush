@@ -180,6 +180,22 @@ func (b *Backend) CancelSession(workspaceID, sessionID string) error {
 	return nil
 }
 
+// BackgroundSessionResult is the outcome of releasing foreground bash waits.
+type BackgroundSessionResult struct {
+	Released int `json:"released"`
+}
+
+// BackgroundSessionForegroundTools releases bash tools that are still
+// blocking the agent turn for the session so they continue as background
+// jobs. Returns how many waits were released.
+func (b *Backend) BackgroundSessionForegroundTools(workspaceID, sessionID string) (BackgroundSessionResult, error) {
+	if _, err := b.GetWorkspace(workspaceID); err != nil {
+		return BackgroundSessionResult{}, err
+	}
+	n := shell.ReleaseForegroundWaits(sessionID)
+	return BackgroundSessionResult{Released: n}, nil
+}
+
 // RevertResult describes the outcome of a revert operation.
 type RevertResult struct {
 	MessagesDeleted int      `json:"messages_deleted"`

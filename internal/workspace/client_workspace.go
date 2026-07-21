@@ -220,6 +220,14 @@ func (w *ClientWorkspace) AgentCancel(sessionID string) {
 	_ = w.client.CancelAgentSession(context.Background(), w.workspaceID(), sessionID)
 }
 
+func (w *ClientWorkspace) AgentBackgroundForegroundTools(sessionID string) int {
+	n, err := w.client.BackgroundAgentSessionForegroundTools(context.Background(), w.workspaceID(), sessionID)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
 func (w *ClientWorkspace) AgentIsBusy() bool {
 	info, err := w.client.GetAgentInfo(context.Background(), w.workspaceID())
 	if err != nil {
@@ -427,7 +435,6 @@ func (w *ClientWorkspace) QuestionCancel() bool {
 	}
 	return cancelled
 }
-
 
 // -- FileTracker --
 

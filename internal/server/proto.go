@@ -865,6 +865,29 @@ func (c *controllerV1) handlePostWorkspaceAgentSessionCancel(w http.ResponseWrit
 	w.WriteHeader(http.StatusOK)
 }
 
+// handlePostWorkspaceAgentSessionBackground releases foreground bash waits
+// so those tools continue as background jobs without canceling the agent.
+//
+//	@Summary		Background foreground agent tools
+//	@Tags			agent
+//	@Produce		json
+//	@Param			id	path	string	true	"Workspace ID"
+//	@Param			sid	path	string	true	"Session ID"
+//	@Success		200	{object}	backend.BackgroundSessionResult
+//	@Failure		404	{object}	proto.Error
+//	@Failure		500	{object}	proto.Error
+//	@Router			/workspaces/{id}/agent/sessions/{sid}/background [post]
+func (c *controllerV1) handlePostWorkspaceAgentSessionBackground(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sid := r.PathValue("sid")
+	result, err := c.backend.BackgroundSessionForegroundTools(id, sid)
+	if err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+	jsonEncode(w, result)
+}
+
 // handlePostWorkspaceAgentSessionRevert reverts a session to a checkpoint.
 //
 //	@Summary		Revert agent session

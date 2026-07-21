@@ -101,6 +101,10 @@ type Workspace interface {
 	AgentRun(ctx context.Context, sessionID, prompt string, attachments ...message.Attachment) error
 	AgentRunShellCommand(ctx context.Context, sessionID, command string, termWidth int, onProgress func(string), isFirstMessage bool) (proto.ShellCommandResponse, error)
 	AgentCancel(sessionID string)
+	// AgentBackgroundForegroundTools releases bash tools that are still
+	// blocking the agent turn so they continue as background jobs (Ctrl+B).
+	// Returns how many foreground waits were released.
+	AgentBackgroundForegroundTools(sessionID string) int
 	AgentIsBusy() bool
 	AgentIsSessionBusy(sessionID string) bool
 	AgentModel() AgentModel

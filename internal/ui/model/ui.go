@@ -2495,6 +2495,16 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 		}
 	}
 
+	// Move blocking bash tools to background without canceling the turn.
+	if key.Matches(msg, m.keyMap.Chat.Background) {
+		if m.isAgentBusy() {
+			if cmd := m.backgroundForegroundTools(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			return tea.Batch(cmds...)
+		}
+	}
+
 	switch m.state {
 	case uiOnboarding:
 		return tea.Batch(cmds...)
@@ -3104,7 +3114,7 @@ func (m *UI) ShortHelp() []key.Binding {
 	case uiInitialize:
 		binds = append(binds, k.Quit)
 	case uiChat:
-		// Show cancel binding if agent is busy.
+		// Show cancel/background bindings if agent is busy.
 		if m.isAgentBusy() {
 			cancelBinding := k.Chat.Cancel
 			if m.isCanceling {
@@ -3112,7 +3122,7 @@ func (m *UI) ShortHelp() []key.Binding {
 			} else if m.promptQueue > 0 {
 				cancelBinding.SetHelp("esc", "clear queue")
 			}
-			binds = append(binds, cancelBinding)
+			binds = append(binds, cancelBinding, k.Chat.Background)
 		}
 
 		switch m.focus {
@@ -3200,7 +3210,7 @@ func (m *UI) FullHelp() [][]key.Binding {
 				k.Quit,
 			})
 	case uiChat:
-		// Show cancel binding if agent is busy.
+		// Show cancel/background bindings if agent is busy.
 		if m.isAgentBusy() {
 			cancelBinding := k.Chat.Cancel
 			if m.isCanceling {
@@ -3208,7 +3218,7 @@ func (m *UI) FullHelp() [][]key.Binding {
 			} else if m.promptQueue > 0 {
 				cancelBinding.SetHelp("esc", "clear queue")
 			}
-			binds = append(binds, []key.Binding{cancelBinding})
+			binds = append(binds, []key.Binding{cancelBinding, k.Chat.Background})
 		}
 
 		mainBinds := []key.Binding{}
@@ -4248,6 +4258,27 @@ func cancelTimerCmd() tea.Cmd {
 	return tea.Tick(cancelTimerDuration, func(time.Time) tea.Msg {
 		return cancelTimerExpiredMsg{}
 	})
+}
+
+// backgroundForegroundTools releases bash tools still blocking the agent
+// turn so they continue as background jobs (Ctrl+B). Does not cancel the
+// agent; the model receives a tool result and can continue, and queued
+// prompts still wait for the turn to finish.
+func (m *UI) backgroundForegroundTools() tea.Cmd {
+	if !m.hasSession() {
+		return nil
+	}
+	if !m.com.Workspace.AgentIsReady() {
+		return nil
+	}
+	n := m.com.Workspace.AgentBackgroundForegroundTools(m.session.ID)
+	if n == 0 {
+		return util.CmdHandler(util.NewInfoMsg("No foreground tools to background"))
+	}
+	if n == 1 {
+		return util.CmdHandler(util.NewInfoMsg("Moved 1 tool to background"))
+	}
+	return util.CmdHandler(util.NewInfoMsg(fmt.Sprintf("Moved %d tools to background", n)))
 }
 
 // cancelAgent handles the cancel key press. The first press sets isCanceling to true

@@ -87,6 +87,9 @@ func (w *countingWorkspace) PermissionSetPlanMode(enabled bool) {
 
 func (w *countingWorkspace) AgentClearQueue(string) { w.clearQueueCalls++; w.queued = nil }
 func (w *countingWorkspace) AgentCancel(string)     { w.cancelCalls++ }
+func (w *countingWorkspace) AgentBackgroundForegroundTools(string) int {
+	return 0
+}
 
 func (w *countingWorkspace) ListMessages(context.Context, string) ([]message.Message, error) {
 	return nil, nil
