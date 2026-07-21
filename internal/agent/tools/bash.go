@@ -321,8 +321,11 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 			autoBackgroundThreshold := time.Duration(autoBackgroundAfter) * time.Second
 			timeout := time.After(autoBackgroundThreshold)
 
-			releaseCh := shell.RegisterForegroundWait(sessionID, bgShell.ID)
-			defer shell.UnregisterForegroundWait(sessionID, bgShell.ID)
+			// Register under the root session so Ctrl+B from the parent
+			// session UI can release waits started by sub-agents.
+			rootSessionID := GetRootSessionFromContext(ctx)
+			releaseCh := shell.RegisterForegroundWait(rootSessionID, bgShell.ID)
+			defer shell.UnregisterForegroundWait(rootSessionID, bgShell.ID)
 
 			var stdout, stderr string
 			var done bool

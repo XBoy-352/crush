@@ -352,9 +352,12 @@ type UI struct {
 	// agentBusyCache / yoloCache / planCache memoize the workspace busy and permission
 	// probes (synchronous HTTP round-trips in client/server mode). Reads
 	// never probe; refreshes happen off-thread (see workspace_cache.go).
-	agentBusyCache    ttlCache
-	yoloCache         ttlCache
-	planCache         ttlCache
+	agentBusyCache ttlCache
+	yoloCache      ttlCache
+	planCache      ttlCache
+	// fgWaitCache memoizes whether the current session has bash tools that
+	// can be manually backgrounded (Ctrl+B). Refreshed with busy probes.
+	fgWaitCache       ttlCache
 	busyFetchInFlight bool
 	// busyFetchGen is bumped by every busy/permission state transition;
 	// like promptQueueGen it lets a stale in-flight probe result be
@@ -2496,8 +2499,10 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 	}
 
 	// Move blocking bash tools to background without canceling the turn.
+	// Only intercept when something is actually waiting; otherwise leave
+	// ctrl+b for the textarea (character-backward) while the user types.
 	if key.Matches(msg, m.keyMap.Chat.Background) {
-		if m.isAgentBusy() {
+		if m.isAgentBusy() && m.hasForegroundWaitsCached() {
 			if cmd := m.backgroundForegroundTools(); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
@@ -3122,7 +3127,10 @@ func (m *UI) ShortHelp() []key.Binding {
 			} else if m.promptQueue > 0 {
 				cancelBinding.SetHelp("esc", "clear queue")
 			}
-			binds = append(binds, cancelBinding, k.Chat.Background)
+			binds = append(binds, cancelBinding)
+			if m.hasForegroundWaitsCached() {
+				binds = append(binds, k.Chat.Background)
+			}
 		}
 
 		switch m.focus {
@@ -3218,7 +3226,10 @@ func (m *UI) FullHelp() [][]key.Binding {
 			} else if m.promptQueue > 0 {
 				cancelBinding.SetHelp("esc", "clear queue")
 			}
-			binds = append(binds, []key.Binding{cancelBinding, k.Chat.Background})
+			binds = append(binds, []key.Binding{cancelBinding})
+			if m.hasForegroundWaitsCached() {
+				binds = append(binds, []key.Binding{k.Chat.Background})
+			}
 		}
 
 		mainBinds := []key.Binding{}
@@ -3975,6 +3986,13 @@ func (m *UI) isAgentBusy() bool {
 	return m.agentBusyCache.val
 }
 
+// hasForegroundWaitsCached reports whether the current session has bash
+// tools that can be manually backgrounded. Memoized with busy probes so
+// the Ctrl+B intercept never does sync IO on the Update goroutine.
+func (m *UI) hasForegroundWaitsCached() bool {
+	return m.hasSession() && m.fgWaitCache.val
+}
+
 // hasSession returns true if there is an active session with a valid ID.
 func (m *UI) hasSession() bool {
 	return m.session != nil && m.session.ID != ""
@@ -4262,8 +4280,9 @@ func cancelTimerCmd() tea.Cmd {
 
 // backgroundForegroundTools releases bash tools still blocking the agent
 // turn so they continue as background jobs (Ctrl+B). Does not cancel the
-// agent; the model receives a tool result and can continue, and queued
-// prompts still wait for the turn to finish.
+// agent; the model receives a tool result and can continue. Queued prompts
+// without a RunID are folded into the next PrepareStep, so they typically
+// run as soon as the released tool returns.
 func (m *UI) backgroundForegroundTools() tea.Cmd {
 	if !m.hasSession() {
 		return nil
@@ -4271,14 +4290,21 @@ func (m *UI) backgroundForegroundTools() tea.Cmd {
 	if !m.com.Workspace.AgentIsReady() {
 		return nil
 	}
-	n := m.com.Workspace.AgentBackgroundForegroundTools(m.session.ID)
-	if n == 0 {
-		return util.CmdHandler(util.NewInfoMsg("No foreground tools to background"))
+	sessionID := m.session.ID
+	ws := m.com.Workspace
+	// Optimistic: binding should stop intercepting until the next probe.
+	m.fgWaitCache.set(false)
+	// Run off the Update goroutine: client mode does a network round-trip.
+	return func() tea.Msg {
+		n := ws.AgentBackgroundForegroundTools(sessionID)
+		if n == 0 {
+			return util.NewInfoMsg("No foreground tools to background")
+		}
+		if n == 1 {
+			return util.NewInfoMsg("Moved 1 tool to background")
+		}
+		return util.NewInfoMsg(fmt.Sprintf("Moved %d tools to background", n))
 	}
-	if n == 1 {
-		return util.CmdHandler(util.NewInfoMsg("Moved 1 tool to background"))
-	}
-	return util.CmdHandler(util.NewInfoMsg(fmt.Sprintf("Moved %d tools to background", n)))
 }
 
 // cancelAgent handles the cancel key press. The first press sets isCanceling to true

@@ -105,6 +105,9 @@ type Workspace interface {
 	// blocking the agent turn so they continue as background jobs (Ctrl+B).
 	// Returns how many foreground waits were released.
 	AgentBackgroundForegroundTools(sessionID string) int
+	// AgentHasForegroundWaits reports whether the session has bash tools
+	// that can be manually backgrounded.
+	AgentHasForegroundWaits(sessionID string) bool
 	AgentIsBusy() bool
 	AgentIsSessionBusy(sessionID string) bool
 	AgentModel() AgentModel

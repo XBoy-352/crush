@@ -228,6 +228,14 @@ func (w *ClientWorkspace) AgentBackgroundForegroundTools(sessionID string) int {
 	return n
 }
 
+func (w *ClientWorkspace) AgentHasForegroundWaits(sessionID string) bool {
+	info, err := w.client.GetAgentSessionInfo(context.Background(), w.workspaceID(), sessionID)
+	if err != nil {
+		return false
+	}
+	return info.HasForegroundWaits
+}
+
 func (w *ClientWorkspace) AgentIsBusy() bool {
 	info, err := w.client.GetAgentInfo(context.Background(), w.workspaceID())
 	if err != nil {

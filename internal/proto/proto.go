@@ -165,11 +165,14 @@ type ShellCommandResponse struct {
 type AgentSession struct {
 	Session
 	IsBusy bool `json:"is_busy"`
+	// HasForegroundWaits is true when bash tools are blocking the agent
+	// turn and can be manually backgrounded (Ctrl+B).
+	HasForegroundWaits bool `json:"has_foreground_waits,omitempty"`
 }
 
 // IsZero checks if the AgentSession is zero-valued.
 func (a AgentSession) IsZero() bool {
-	return a.ID == "" && !a.IsBusy
+	return a.ID == "" && !a.IsBusy && !a.HasForegroundWaits
 }
 
 // PermissionAction represents an action taken on a permission request.

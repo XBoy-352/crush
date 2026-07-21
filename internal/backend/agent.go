@@ -188,8 +188,14 @@ type BackgroundSessionResult struct {
 // BackgroundSessionForegroundTools releases bash tools that are still
 // blocking the agent turn for the session so they continue as background
 // jobs. Returns how many waits were released.
-func (b *Backend) BackgroundSessionForegroundTools(workspaceID, sessionID string) (BackgroundSessionResult, error) {
-	if _, err := b.GetWorkspace(workspaceID); err != nil {
+func (b *Backend) BackgroundSessionForegroundTools(ctx context.Context, workspaceID, sessionID string) (BackgroundSessionResult, error) {
+	ws, err := b.GetWorkspace(workspaceID)
+	if err != nil {
+		return BackgroundSessionResult{}, err
+	}
+	// Ensure the session exists in this workspace before touching the
+	// process-global wait registry.
+	if _, err := ws.Sessions.Get(ctx, sessionID); err != nil {
 		return BackgroundSessionResult{}, err
 	}
 	n := shell.ReleaseForegroundWaits(sessionID)

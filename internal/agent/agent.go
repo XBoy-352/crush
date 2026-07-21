@@ -752,6 +752,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	// cancel func were already created and registered under the dispatch
 	// mutex above for both the accepted and in-process paths.
 	ctx = context.WithValue(ctx, tools.SessionIDContextKey, call.SessionID)
+
+	// Preserve an existing root session when this is a sub-agent run under
+	// a parent turn. Top-level runs stamp themselves as the root.
+	if ctx.Value(tools.RootSessionIDContextKey) == nil {
+		ctx = context.WithValue(ctx, tools.RootSessionIDContextKey, call.SessionID)
+	}
 	// skipRunComplete is set just before the queued-recursion path so
 	// the outer Run doesn't publish a RunComplete that would race
 	// with — and be superseded by — the recursive call's own

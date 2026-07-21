@@ -880,7 +880,7 @@ func (c *controllerV1) handlePostWorkspaceAgentSessionCancel(w http.ResponseWrit
 func (c *controllerV1) handlePostWorkspaceAgentSessionBackground(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	sid := r.PathValue("sid")
-	result, err := c.backend.BackgroundSessionForegroundTools(id, sid)
+	result, err := c.backend.BackgroundSessionForegroundTools(r.Context(), id, sid)
 	if err != nil {
 		c.handleError(w, r, err)
 		return

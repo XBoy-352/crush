@@ -168,6 +168,10 @@ func (w *AppWorkspace) AgentBackgroundForegroundTools(sessionID string) int {
 	return shell.ReleaseForegroundWaits(sessionID)
 }
 
+func (w *AppWorkspace) AgentHasForegroundWaits(sessionID string) bool {
+	return shell.HasForegroundWaits(sessionID)
+}
+
 func (w *AppWorkspace) AgentIsBusy() bool {
 	if w.app.AgentCoordinator == nil {
 		return false

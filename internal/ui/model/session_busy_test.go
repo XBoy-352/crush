@@ -90,6 +90,7 @@ func (w *countingWorkspace) AgentCancel(string)     { w.cancelCalls++ }
 func (w *countingWorkspace) AgentBackgroundForegroundTools(string) int {
 	return 0
 }
+func (w *countingWorkspace) AgentHasForegroundWaits(string) bool { return false }
 
 func (w *countingWorkspace) ListMessages(context.Context, string) ([]message.Message, error) {
 	return nil, nil
