@@ -133,7 +133,13 @@ func (m *UI) dispatchBusyRefresh() tea.Cmd {
 		st := busyStateMsg{gen: gen}
 		if ws.AgentIsReady() {
 			st.agentBusy = ws.AgentIsBusy()
-			if sessionID != "" {
+			// Only probe for backgroundable tools while the agent is
+			// actually busy: this is a second HTTP round-trip per refresh
+			// in client/server mode, and every consumer of the result
+			// (the Ctrl+B intercept, ShortHelp, FullHelp) is already
+			// gated on isAgentBusy. Probing it at idle would double the
+			// backstop's network traffic for a value nothing can read.
+			if st.agentBusy && sessionID != "" {
 				st.hasForegroundWaits = ws.AgentHasForegroundWaits(sessionID)
 			}
 		}
