@@ -50,6 +50,13 @@ import (
 	"github.com/charmbracelet/x/exp/charmtone"
 )
 
+// providerMaxRetries is how many times a failed provider request is
+// retried before the error is surfaced. Fantasy defaults to 3; Crush
+// raises this so transient rate limits and network blips recover more
+// often. Combined with exponential backoff (and Retry-After headers),
+// the wait is still cancelable with Escape / Ctrl+C.
+const providerMaxRetries = 10
+
 const (
 	DefaultSessionName = "Untitled Session"
 
@@ -825,6 +832,8 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	if call.MaxOutputTokens > 0 {
 		maxOutputTokens = &call.MaxOutputTokens
 	}
+	maxRetries := providerMaxRetries
+	var retryAttempt atomic.Int32
 	result, err = agent.Stream(genCtx, fantasy.AgentStreamCall{
 		Prompt:           message.PromptWithTextAttachments(call.Prompt, call.Attachments),
 		Files:            files,
@@ -837,6 +846,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		PresencePenalty:  call.PresencePenalty,
 		TopK:             call.TopK,
 		FrequencyPenalty: call.FrequencyPenalty,
+		MaxRetries:       &maxRetries,
 		PrepareStep: func(callContext context.Context, options fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
 			prepared.Messages = options.Messages
 			for i := range prepared.Messages {
@@ -961,15 +971,19 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			return a.messages.Update(ctx, *currentAssistant)
 		},
 		OnRetry: func(err *fantasy.ProviderError, delay time.Duration) {
-			slog.Warn("Provider request failed, retrying", providerRetryLogFields(err, delay)...)
+			attempt := int(retryAttempt.Add(1))
+			slog.Warn("Provider request failed, retrying", providerRetryLogFields(err, delay, attempt, maxRetries)...)
 			// Reset streamed content so the retried response doesn't
 			// concatenate with partial content from the failed attempt.
 			// On the final attempt (no more retries), any partial content
 			// stays in the message as useful context beneath the error.
-			currentAssistant.ResetStreamedContent()
-			if updateErr := a.messages.Update(genCtx, *currentAssistant); updateErr != nil {
-				slog.Error("Failed to reset message on retry", "error", updateErr)
+			if currentAssistant != nil {
+				currentAssistant.ResetStreamedContent()
+				if updateErr := a.messages.Update(genCtx, *currentAssistant); updateErr != nil {
+					slog.Error("Failed to reset message on retry", "error", updateErr)
+				}
 			}
+			a.publishRetry(call.SessionID, currentSession.Title, largeModel.ModelCfg.Provider, err, delay, attempt, maxRetries)
 		},
 		OnAuthRefresh: call.OnAuthRefresh,
 		ModelProvider: func() fantasy.LanguageModel {
@@ -1403,17 +1417,29 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 
 	summaryPromptText := buildSummaryPrompt(currentSession.Todos)
 
+	maxRetries := providerMaxRetries
+	var retryAttempt atomic.Int32
 	resp, err := agent.Stream(genCtx, fantasy.AgentStreamCall{
 		Prompt:          summaryPromptText,
 		Messages:        aiMsgs,
 		Headers:         sessionHeaders(sessionID),
 		ProviderOptions: opts,
+		MaxRetries:      &maxRetries,
 		PrepareStep: func(callContext context.Context, options fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
 			prepared.Messages = options.Messages
 			if systemPromptPrefix != "" {
 				prepared.Messages = append([]fantasy.Message{fantasy.NewSystemMessage(systemPromptPrefix)}, prepared.Messages...)
 			}
 			return callContext, prepared, nil
+		},
+		OnRetry: func(err *fantasy.ProviderError, delay time.Duration) {
+			attempt := int(retryAttempt.Add(1))
+			slog.Warn("Provider request failed, retrying", providerRetryLogFields(err, delay, attempt, maxRetries)...)
+			summaryMessage.ResetStreamedContent()
+			if updateErr := a.messages.Update(genCtx, summaryMessage); updateErr != nil {
+				slog.Error("Failed to reset summary message on retry", "error", updateErr)
+			}
+			a.publishRetry(sessionID, currentSession.Title, largeModel.ModelCfg.Provider, err, delay, attempt, maxRetries)
 		},
 		OnReasoningDelta: func(id string, text string) error {
 			summaryMessage.AppendReasoningContent(text)
@@ -1883,9 +1909,17 @@ func (a *sessionAgent) GenerateTitle(ctx context.Context, sessionID string, user
 		)
 	}
 
+	maxRetries := providerMaxRetries
+	var retryAttempt atomic.Int32
 	streamCall := fantasy.AgentStreamCall{
-		Prompt:  fmt.Sprintf("Generate a concise title for the following content:\n\n%s\n <think>\n\n</think>", userPrompt),
-		Headers: sessionHeaders(sessionID),
+		Prompt:     fmt.Sprintf("Generate a concise title for the following content:\n\n%s\n <think>\n\n</think>", userPrompt),
+		Headers:    sessionHeaders(sessionID),
+		MaxRetries: &maxRetries,
+		OnRetry: func(err *fantasy.ProviderError, delay time.Duration) {
+			attempt := int(retryAttempt.Add(1))
+			slog.Warn("Provider request failed, retrying", providerRetryLogFields(err, delay, attempt, maxRetries)...)
+			a.publishRetry(sessionID, "", "", err, delay, attempt, maxRetries)
+		},
 		PrepareStep: func(callCtx context.Context, opts fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
 			prepared.Messages = opts.Messages
 			if systemPromptPrefix != "" {
@@ -2379,9 +2413,11 @@ func buildSummaryPrompt(todos []session.Todo) string {
 	return sb.String()
 }
 
-func providerRetryLogFields(err *fantasy.ProviderError, delay time.Duration) []any {
+func providerRetryLogFields(err *fantasy.ProviderError, delay time.Duration, attempt, maxRetries int) []any {
 	fields := []any{
 		"retry_delay", delay.String(),
+		"attempt", attempt,
+		"max_retries", maxRetries,
 	}
 	if err == nil {
 		return fields
@@ -2394,6 +2430,28 @@ func providerRetryLogFields(err *fantasy.ProviderError, delay time.Duration) []a
 		fields = append(fields, "message", err.Message)
 	}
 	return fields
+}
+
+// publishRetry notifies the UI that a provider request failed and the
+// agent is backing off before the next attempt.
+func (a *sessionAgent) publishRetry(sessionID, sessionTitle, providerID string, err *fantasy.ProviderError, delay time.Duration, attempt, maxRetries int) {
+	if a.notify == nil {
+		return
+	}
+	msg := "provider error"
+	if err != nil {
+		msg = cmp.Or(err.Title, err.Message, msg)
+	}
+	a.notify.Publish(pubsub.CreatedEvent, notify.Notification{
+		SessionID:    sessionID,
+		SessionTitle: sessionTitle,
+		Type:         notify.TypeRetry,
+		ProviderID:   providerID,
+		Message:      msg,
+		RetryDelay:   delay,
+		Attempt:      attempt,
+		MaxRetries:   maxRetries,
+	})
 }
 
 // sanitizeToolInput validates tool call JSON from the provider.

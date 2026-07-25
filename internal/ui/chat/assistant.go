@@ -125,9 +125,12 @@ type AssistantMessageItem struct {
 	*cachedMessageItem
 	*focusableMessageItem
 
-	message           *message.Message
-	sty               *styles.Styles
-	anim              *anim.Anim
+	message *message.Message
+	sty     *styles.Styles
+	anim    *anim.Anim
+	// workingLabel overrides the default spinner label (Thinking /
+	// Summarizing / Working) while set, e.g. a live retry countdown.
+	workingLabel      string
 	thinkingViewMode  thinkingViewMode
 	thinkingBoxHeight int // Tracks the rendered thinking box height for click detection.
 
@@ -518,11 +521,24 @@ func (a *AssistantMessageItem) renderMarkdown(content string, width int) string 
 	return a.streamingContent.Render(content, width, renderer)
 }
 
+// SetWorkingLabel overrides the spinner label shown while the assistant
+// message is still generating (e.g. "Retrying in 5s"). Pass an empty
+// string to restore the default Thinking / Summarizing / Working label.
+func (a *AssistantMessageItem) SetWorkingLabel(label string) {
+	a.workingLabel = label
+	a.Bump()
+}
+
 func (a *AssistantMessageItem) renderSpinning() string {
-	if a.message.IsThinking() {
+	switch {
+	case a.workingLabel != "":
+		a.anim.SetLabel(a.workingLabel)
+	case a.message.IsThinking():
 		a.anim.SetLabel("Thinking")
-	} else if a.message.IsSummaryMessage {
+	case a.message.IsSummaryMessage:
 		a.anim.SetLabel("Summarizing")
+	default:
+		a.anim.SetLabel("Working")
 	}
 	return a.anim.Render()
 }

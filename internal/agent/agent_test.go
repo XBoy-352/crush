@@ -14,6 +14,7 @@ import (
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
 	"charm.land/x/vcr"
+	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/message"
@@ -725,7 +726,7 @@ func TestCreateUserMessage_RetainsAllAttachments(t *testing.T) {
 	sess, err := env.sessions.Create(ctx, "test")
 	require.NoError(t, err)
 
-	// Mix of text and image attachments — all should be stored.
+	// Mix of text and image attachments - all should be stored.
 	call := SessionAgentCall{
 		SessionID: sess.ID,
 		Prompt:    "look at this image",
@@ -772,7 +773,7 @@ func TestPreparePrompt_OrphanedToolUse(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Create an assistant message with a tool call but no tool result —
+	// Create an assistant message with a tool call but no tool result -
 	// this simulates a cancelled/interrupted agent tool call.
 	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
 		Role: message.Assistant,
@@ -858,7 +859,7 @@ func TestPreparePrompt_OrphanedToolUseMixed(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Only one tool result — for call_ok.
+	// Only one tool result - for call_ok.
 	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
 		Role: message.Tool,
 		Parts: []message.ContentPart{
@@ -915,7 +916,7 @@ func TestWorkaroundProviderMediaLimitations_TextOnlyModel(t *testing.T) {
 		},
 	}
 
-	// Non-Anthropic provider, no image support — should replace media with
+	// Non-Anthropic provider, no image support - should replace media with
 	// a text placeholder and not create a synthetic user message.
 	largeModel := Model{
 		ModelCfg: config.SelectedModel{Provider: "openai"},
@@ -959,7 +960,7 @@ func TestWorkaroundProviderMediaLimitations_VisionModel(t *testing.T) {
 		},
 	}
 
-	// Non-Anthropic provider, image support — should create a synthetic
+	// Non-Anthropic provider, image support - should create a synthetic
 	// user message with FilePart.
 	largeModel := Model{
 		ModelCfg: config.SelectedModel{Provider: "openai"},
@@ -1012,7 +1013,7 @@ func TestWorkaroundProviderMediaLimitations_AnthropicProvider(t *testing.T) {
 		},
 	}
 
-	// Anthropic provider — should return messages unchanged regardless of
+	// Anthropic provider - should return messages unchanged regardless of
 	// SupportsImages, since Anthropic handles media in tool results natively.
 	largeModel := Model{
 		ModelCfg: config.SelectedModel{Provider: string(catwalk.InferenceProviderAnthropic)},
@@ -1035,8 +1036,12 @@ func TestWorkaroundProviderMediaLimitations_AnthropicProvider(t *testing.T) {
 
 func TestProviderRetryLogFields(t *testing.T) {
 	t.Run("nil provider error", func(t *testing.T) {
-		fields := providerRetryLogFields(nil, 2*time.Second)
-		require.Equal(t, []any{"retry_delay", "2s"}, fields)
+		fields := providerRetryLogFields(nil, 2*time.Second, 1, 10)
+		require.Equal(t, []any{
+			"retry_delay", "2s",
+			"attempt", 1,
+			"max_retries", 10,
+		}, fields)
 	})
 
 	t.Run("provider error with title and message", func(t *testing.T) {
@@ -1044,9 +1049,11 @@ func TestProviderRetryLogFields(t *testing.T) {
 			StatusCode: 429,
 			Title:      "rate limit",
 			Message:    "too many requests",
-		}, 1500*time.Millisecond)
+		}, 1500*time.Millisecond, 3, 10)
 		require.Equal(t, []any{
 			"retry_delay", "1.5s",
+			"attempt", 3,
+			"max_retries", 10,
 			"status_code", 429,
 			"title", "rate limit",
 			"message", "too many requests",
@@ -1056,10 +1063,52 @@ func TestProviderRetryLogFields(t *testing.T) {
 	t.Run("provider error without optional strings", func(t *testing.T) {
 		fields := providerRetryLogFields(&fantasy.ProviderError{
 			StatusCode: 503,
-		}, time.Second)
+		}, time.Second, 2, 10)
 		require.Equal(t, []any{
 			"retry_delay", "1s",
+			"attempt", 2,
+			"max_retries", 10,
 			"status_code", 503,
 		}, fields)
 	})
+}
+
+func TestFormatRetryStatus(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(
+		t,
+		"Retrying in 5s (attempt 2/10) - rate limit",
+		notify.FormatRetryStatus(notify.Notification{
+			Type:       notify.TypeRetry,
+			Message:    "rate limit",
+			RetryDelay: 5 * time.Second,
+			Attempt:    2,
+			MaxRetries: 10,
+		}, 5*time.Second),
+	)
+
+	require.Equal(
+		t,
+		"Retrying in 1s (attempt 1/10)",
+		notify.FormatRetryStatus(notify.Notification{
+			Type:       notify.TypeRetry,
+			RetryDelay: time.Second,
+			Attempt:    1,
+			MaxRetries: 10,
+		}, time.Second),
+	)
+
+	// Sub-second remainders still show as 1s so the bar never flashes 0s.
+	require.Equal(
+		t,
+		"Retrying in 1s (attempt 1/10) - overloaded",
+		notify.FormatRetryStatus(notify.Notification{
+			Type:       notify.TypeRetry,
+			Message:    "overloaded",
+			RetryDelay: 500 * time.Millisecond,
+			Attempt:    1,
+			MaxRetries: 10,
+		}, 200*time.Millisecond),
+	)
 }
