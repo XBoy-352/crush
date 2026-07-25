@@ -1751,16 +1751,14 @@ func workflowBaseCallID(id string) (string, bool) {
 }
 
 func (m *UI) lookupNestedToolContainer(toolCallID string) chat.NestedToolContainer {
-	for i := 0; i < m.chat.Len(); i++ {
-		item := m.chat.MessageItem(toolCallID)
-		if item == nil {
-			continue
-		}
-		if agent, ok := item.(chat.NestedToolContainer); ok {
-			if toolMessageItem, ok := item.(chat.ToolMessageItem); ok {
-				if toolMessageItem.ToolCall().ID == toolCallID {
-					return agent
-				}
+	item := m.chat.MessageItem(toolCallID)
+	if item == nil {
+		return nil
+	}
+	if container, ok := item.(chat.NestedToolContainer); ok {
+		if toolMessageItem, ok := item.(chat.ToolMessageItem); ok {
+			if toolMessageItem.ToolCall().ID == toolCallID {
+				return container
 			}
 		}
 	}

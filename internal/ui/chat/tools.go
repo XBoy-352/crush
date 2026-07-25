@@ -1290,7 +1290,7 @@ func (t *baseToolMessageItem) formatParametersForCopy() string {
 	case agent.WorkflowToolName:
 		var params agent.WorkflowParams
 		if json.Unmarshal([]byte(t.toolCall.Input), &params) == nil {
-			return fmt.Sprintf("**Description:** %s\n```js\n%s\n```", params.Description, params.Script)
+			return fmt.Sprintf("**Description:** %s\n```lua\n%s\n```", params.Description, params.Script)
 		}
 	}
 

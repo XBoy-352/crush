@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 )
@@ -49,7 +50,6 @@ func TestWorkflowRun_ReturnTypes(t *testing.T) {
 		{"return nil", ""},
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.script, func(t *testing.T) {
 			t.Parallel()
 			res, err := Run(context.Background(), tc.script, nil, Options{})
@@ -61,6 +61,13 @@ func TestWorkflowRun_ReturnTypes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWorkflowRun_EmptyTable(t *testing.T) {
+	t.Parallel()
+	res, err := Run(context.Background(), "return {}", nil, Options{})
+	require.NoError(t, err)
+	require.JSONEq(t, "[]", res.Value)
 }
 
 func TestWorkflowRun_AgentErrors(t *testing.T) {
@@ -107,12 +114,13 @@ func TestWorkflowRun_Parallel(t *testing.T) {
 		return res
 	`
 	spawn := func(ctx context.Context, index int, label, prompt string) (string, error) {
+		assert.NotEmpty(t, prompt)
 		if prompt == "a" {
-			require.Equal(t, "l1", label)
+			assert.Equal(t, "l1", label)
 			return "A", nil
 		}
 		if prompt == "b" {
-			require.Equal(t, "", label)
+			assert.Equal(t, "", label)
 			return "", errors.New("B_ERR")
 		}
 		return "", fmt.Errorf("unexpected prompt %q", prompt)
@@ -142,15 +150,15 @@ func TestWorkflowRun_ParallelValidation(t *testing.T) {
 		if ok then return "fail" end
 		return err
 	`
-	var called bool
+	var called atomic.Bool
 	spawn := func(ctx context.Context, index int, label, prompt string) (string, error) {
-		called = true
+		called.Store(true)
 		return "", nil
 	}
 	res, err := Run(context.Background(), script, spawn, Options{})
 	require.NoError(t, err)
 	require.Contains(t, res.Value, "missing a prompt string")
-	require.False(t, called)
+	require.False(t, called.Load())
 }
 
 func TestWorkflowRun_Concurrency(t *testing.T) {
@@ -179,7 +187,9 @@ func TestWorkflowRun_Concurrency(t *testing.T) {
 	res, err := Run(context.Background(), script, spawn, Options{MaxConcurrent: 3, MaxAgents: 20})
 	require.NoError(t, err)
 	require.Equal(t, 10, res.AgentCount)
-	require.LessOrEqual(t, int(atomic.LoadInt32(&maxActive)), 3)
+	max := int(atomic.LoadInt32(&maxActive))
+	require.LessOrEqual(t, max, 3)
+	require.GreaterOrEqual(t, max, 2)
 }
 
 func TestWorkflowRun_Caps(t *testing.T) {
@@ -237,7 +247,6 @@ func TestWorkflowRun_JSON(t *testing.T) {
 		{"garbage", "not json at all", "", true},
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			val, err := extractJSON(tc.output)
@@ -301,4 +310,86 @@ func TestWorkflowRun_LoopUntilDry(t *testing.T) {
 	require.NoError(t, err)
 	require.JSONEq(t, `["a","b","c"]`, res.Value)
 	require.Equal(t, 3, res.AgentCount)
+}
+
+func TestWorkflowRun_Sandbox(t *testing.T) {
+	t.Parallel()
+	script := `
+		return {
+			type_os = type(os),
+			type_io = type(io),
+			type_require = type(require),
+			type_debug = type(debug),
+			type_dofile = type(dofile),
+			type_loadfile = type(loadfile),
+			type_print = type(print),
+			type_package = type(package),
+		}
+	`
+	res, err := Run(context.Background(), script, nil, Options{})
+	require.NoError(t, err)
+
+	var m map[string]string
+	require.NoError(t, json.Unmarshal([]byte(res.Value), &m))
+	for _, k := range []string{"type_os", "type_io", "type_require", "type_debug", "type_dofile", "type_loadfile", "type_print", "type_package"} {
+		require.Equal(t, "nil", m[k], k)
+	}
+}
+
+func TestWorkflowRun_CyclicTable(t *testing.T) {
+	t.Parallel()
+	script := `
+		local t = {}
+		t.self = t
+		return t
+	`
+	_, err := Run(context.Background(), script, nil, Options{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cyclic")
+}
+
+func TestWorkflowRun_NaN(t *testing.T) {
+	t.Parallel()
+	script := `return {bad = 0/0}`
+	_, err := Run(context.Background(), script, nil, Options{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "NaN")
+}
+
+func TestWorkflowRun_Inf(t *testing.T) {
+	t.Parallel()
+	script := `return {inf = 1/0}`
+	_, err := Run(context.Background(), script, nil, Options{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "Inf")
+}
+
+func TestWorkflowRun_Timeout(t *testing.T) {
+	t.Parallel()
+	script := `while true do end`
+	start := time.Now()
+	_, err := Run(context.Background(), script, nil, Options{Timeout: 100 * time.Millisecond})
+	require.Error(t, err)
+	require.Less(t, time.Since(start), 2*time.Second)
+}
+
+func TestWorkflowRun_ParallelJSONExtractionError(t *testing.T) {
+	t.Parallel()
+	script := `
+		local res = parallel({
+			{prompt = "a", json = true}
+		})
+		return res
+	`
+	spawn := func(ctx context.Context, index int, label, prompt string) (string, error) {
+		return "not json at all", nil
+	}
+	res, err := Run(context.Background(), script, spawn, Options{})
+	require.NoError(t, err)
+
+	var arr []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(res.Value), &arr))
+	require.Len(t, arr, 1)
+	require.Equal(t, false, arr[0]["ok"])
+	require.Contains(t, arr[0]["error"].(string), "no JSON")
 }

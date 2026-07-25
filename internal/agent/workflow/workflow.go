@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
+	"time"
 
 	lua "github.com/yuin/gopher-lua"
 )
@@ -14,9 +16,11 @@ import (
 const (
 	DefaultMaxConcurrent = 5
 	DefaultMaxAgents     = 100
+	DefaultTimeout       = 5 * time.Minute
 	MaxScriptBytes       = 64 * 1024
 	maxLogEntries        = 200
 	maxLogEntryBytes     = 2048
+	maxJSONDepth         = 100
 )
 
 // SpawnFunc runs one subagent. index is the global 0-based agent index
@@ -26,8 +30,9 @@ type SpawnFunc func(ctx context.Context, index int, label, prompt string) (strin
 
 // Options configures workflow execution limits.
 type Options struct {
-	MaxConcurrent int // <=0 → DefaultMaxConcurrent
-	MaxAgents     int // <=0 → DefaultMaxAgents
+	MaxConcurrent int           // <=0 → DefaultMaxConcurrent
+	MaxAgents     int           // <=0 → DefaultMaxAgents
+	Timeout       time.Duration // <=0 → DefaultTimeout
 }
 
 // Result is the outcome of a workflow run.
@@ -99,13 +104,19 @@ func Run(ctx context.Context, script string, spawn SpawnFunc, opts Options) (Res
 	if opts.MaxAgents <= 0 {
 		opts.MaxAgents = DefaultMaxAgents
 	}
+	if opts.Timeout <= 0 {
+		opts.Timeout = DefaultTimeout
+	}
 
-	L := lua.NewState()
+	runCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
+	defer cancel()
+
+	L := newSandboxedState()
 	defer L.Close()
-	L.SetContext(ctx)
+	L.SetContext(runCtx)
 
 	st := &runState{
-		ctx:   ctx,
+		ctx:   runCtx,
 		spawn: spawn,
 		opts:  opts,
 		sem:   make(chan struct{}, opts.MaxConcurrent),
@@ -115,27 +126,27 @@ func Run(ctx context.Context, script string, spawn SpawnFunc, opts Options) (Res
 	registerParallel(L, st)
 	registerLog(L, st)
 
-	// Wrap the script in a function and call it, so `return` works.
-	wrapped := "return function()\n" + script + "\nend"
+	// Wrap so bare `return` works. The comment keeps script line numbers
+	// aligned (wrapper line 1 maps to script line 1 after offset strip).
+	wrapped := "return function() -- line 1\n" + script + "\nend"
 	fn, err := L.LoadString(wrapped)
 	if err != nil {
-		return Result{}, fmt.Errorf("script error: %w", err)
+		return Result{}, fmt.Errorf("script error: %w", stripLineOffset(err))
 	}
 	L.Push(fn)
 	if err := L.PCall(0, 1, nil); err != nil {
-		return Result{}, fmt.Errorf("script error: %w", err)
+		return Result{}, fmt.Errorf("script error: %w", stripLineOffset(err))
 	}
 
-	// The chunk returns a function; call it.
 	if err := L.CallByParam(lua.P{
 		Fn:      L.Get(-1),
 		NRet:    1,
 		Protect: true,
 	}, lua.LNil); err != nil {
-		if ctx.Err() != nil {
-			return Result{}, ctx.Err()
+		if runCtx.Err() != nil {
+			return Result{}, runCtx.Err()
 		}
-		return Result{}, fmt.Errorf("workflow script failed: %w", err)
+		return Result{}, fmt.Errorf("workflow script failed: %w", stripLineOffset(err))
 	}
 
 	ret := L.Get(-1)
@@ -143,7 +154,15 @@ func Run(ctx context.Context, script string, spawn SpawnFunc, opts Options) (Res
 
 	var val string
 	if ret != lua.LNil {
-		val = luaValueToJSON(L, ret)
+		tree, err := luaToGo(ret, make(map[*lua.LTable]bool), 0)
+		if err != nil {
+			return Result{}, fmt.Errorf("failed to serialize return value: %w", err)
+		}
+		b, err := json.Marshal(tree)
+		if err != nil {
+			return Result{}, fmt.Errorf("could not marshal return value: %w", err)
+		}
+		val = string(b)
 	}
 
 	st.mu.Lock()
@@ -158,7 +177,64 @@ func Run(ctx context.Context, script string, spawn SpawnFunc, opts Options) (Res
 	}, nil
 }
 
-// registerAgent registers the `agent(prompt, opts?)` function.
+// newSandboxedState creates a Lua state with only safe stdlib libraries:
+// base, table, string, math. It does not load os, io, package, or debug.
+func newSandboxedState() *lua.LState {
+	L := lua.NewState(lua.Options{SkipOpenLibs: true})
+	for _, lib := range []struct {
+		name string
+		fn   lua.LGFunction
+	}{
+		{lua.BaseLibName, lua.OpenBase},
+		{lua.TabLibName, lua.OpenTable},
+		{lua.StringLibName, lua.OpenString},
+		{lua.MathLibName, lua.OpenMath},
+	} {
+		if err := L.CallByParam(lua.P{
+			Fn:      L.NewFunction(lib.fn),
+			NRet:    0,
+			Protect: true,
+		}, lua.LString(lib.name)); err != nil {
+			L.Close()
+			panic(fmt.Sprintf("failed to open %s lib: %v", lib.name, err))
+		}
+	}
+	for _, g := range []string{
+		"dofile", "loadfile", "load", "loadstring", "print", "collectgarbage",
+		// OpenBase registers these as globals even without package/os libs.
+		"require", "module", "package", "os", "io", "debug", "coroutine",
+	} {
+		L.SetGlobal(g, lua.LNil)
+	}
+	return L
+}
+
+// stripLineOffset adjusts error line numbers for the wrapper line.
+func stripLineOffset(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	idx := strings.Index(msg, ":")
+	if idx == -1 {
+		return err
+	}
+	rest := msg[idx+1:]
+	end := strings.IndexAny(rest, ":")
+	if end == -1 {
+		return err
+	}
+	var lineNum int
+	if _, parseErr := fmt.Sscanf(rest[:end], "%d", &lineNum); parseErr != nil {
+		return err
+	}
+	adjusted := lineNum - 1
+	if adjusted < 1 {
+		adjusted = 1
+	}
+	return errors.New(msg[:idx+1] + fmt.Sprintf("%d", adjusted) + rest[end:])
+}
+
 func registerAgent(L *lua.LState, st *runState) {
 	L.SetGlobal("agent", L.NewFunction(func(L *lua.LState) int {
 		if L.GetTop() == 0 {
@@ -218,7 +294,6 @@ func registerAgent(L *lua.LState, st *runState) {
 	}))
 }
 
-// registerParallel registers the `parallel(calls)` function.
 func registerParallel(L *lua.LState, st *runState) {
 	L.SetGlobal("parallel", L.NewFunction(func(L *lua.LState) int {
 		if L.GetTop() == 0 {
@@ -300,24 +375,27 @@ func registerParallel(L *lua.LState, st *runState) {
 				entry.RawSetString("ok", lua.LFalse)
 				entry.RawSetString("error", lua.LString(res.err.Error()))
 				entry.RawSetString("label", lua.LString(parsed[i].label))
-			} else {
-				if parsed[i].isJSON {
-					jsTxt, err := extractJSON(res.text)
+			} else if parsed[i].isJSON {
+				jsTxt, err := extractJSON(res.text)
+				if err != nil {
+					entry.RawSetString("ok", lua.LFalse)
+					entry.RawSetString("error", lua.LString(err.Error()))
+					entry.RawSetString("label", lua.LString(parsed[i].label))
+				} else {
+					luaVal, err := jsonToLua(L, jsTxt)
 					if err != nil {
 						entry.RawSetString("ok", lua.LFalse)
 						entry.RawSetString("error", lua.LString(err.Error()))
-						entry.RawSetString("label", lua.LString(parsed[i].label))
 					} else {
 						entry.RawSetString("ok", lua.LTrue)
-						luaVal, _ := jsonToLua(L, jsTxt)
 						entry.RawSetString("value", luaVal)
-						entry.RawSetString("label", lua.LString(parsed[i].label))
 					}
-				} else {
-					entry.RawSetString("ok", lua.LTrue)
-					entry.RawSetString("value", lua.LString(res.text))
 					entry.RawSetString("label", lua.LString(parsed[i].label))
 				}
+			} else {
+				entry.RawSetString("ok", lua.LTrue)
+				entry.RawSetString("value", lua.LString(res.text))
+				entry.RawSetString("label", lua.LString(parsed[i].label))
 			}
 			out.RawSetInt(i+1, entry)
 		}
@@ -327,7 +405,6 @@ func registerParallel(L *lua.LState, st *runState) {
 	}))
 }
 
-// registerLog registers the `log(msg)` function.
 func registerLog(L *lua.LState, st *runState) {
 	L.SetGlobal("log", L.NewFunction(func(L *lua.LState) int {
 		if L.GetTop() > 0 {
@@ -337,76 +414,83 @@ func registerLog(L *lua.LState, st *runState) {
 	}))
 }
 
-// tableToSlice converts a Lua table used as a 1-indexed array into a slice.
 func tableToSlice(t *lua.LTable) []lua.LValue {
 	var out []lua.LValue
-	t.ForEach(func(k, v lua.LValue) {
+	t.ForEach(func(_, v lua.LValue) {
 		out = append(out, v)
 	})
 	return out
 }
 
-// luaValueToJSON converts a Lua value to a JSON string.
-func luaValueToJSON(L *lua.LState, v lua.LValue) string {
+// luaToGo converts a Lua value to a Go any suitable for json.Marshal.
+// Includes cycle detection and a depth cap.
+func luaToGo(v lua.LValue, seen map[*lua.LTable]bool, depth int) (any, error) {
+	if depth > maxJSONDepth {
+		return nil, errors.New("table nesting exceeds maximum depth")
+	}
 	switch val := v.(type) {
 	case lua.LString:
-		return `"` + jsonEscape(string(val)) + `"`
+		return string(val), nil
 	case lua.LNumber:
-		return fmt.Sprintf("%v", float64(val))
+		n := float64(val)
+		if math.IsNaN(n) || math.IsInf(n, 0) {
+			return nil, errors.New("cannot serialize NaN or Inf as JSON")
+		}
+		return n, nil
 	case lua.LBool:
-		if bool(val) {
-			return "true"
-		}
-		return "false"
+		return bool(val), nil
 	case *lua.LTable:
-		// Determine if it's an array or object.
-		if isArray(val) {
-			return luaTableToJSONArray(L, val)
+		if seen[val] {
+			return nil, errors.New("cannot serialize cyclic table")
 		}
-		return luaTableToJSONObject(L, val)
+		seen[val] = true
+		defer delete(seen, val)
+
+		if isArrayTable(val) {
+			arr := make([]any, 0, val.Len())
+			for i := 1; i <= val.Len(); i++ {
+				elem, err := luaToGo(val.RawGetInt(i), seen, depth+1)
+				if err != nil {
+					return nil, err
+				}
+				arr = append(arr, elem)
+			}
+			return arr, nil
+		}
+		m := map[string]any{}
+		var convertErr error
+		val.ForEach(func(k, child lua.LValue) {
+			if convertErr != nil {
+				return
+			}
+			converted, err := luaToGo(child, seen, depth+1)
+			if err != nil {
+				convertErr = err
+				return
+			}
+			m[lua.LVAsString(k)] = converted
+		})
+		if convertErr != nil {
+			return nil, convertErr
+		}
+		return m, nil
 	default:
-		return "null"
+		return nil, nil
 	}
 }
 
-// isArray returns true if the table is a sequence (1..n).
-func isArray(t *lua.LTable) bool {
-	if t.Len() == 0 {
-		return false
-	}
-	arr := true
+// isArrayTable returns true if the table is a sequence (1..n).
+// Empty tables are treated as arrays so they serialize as [].
+func isArrayTable(t *lua.LTable) bool {
+	isArray := true
 	t.ForEach(func(k, _ lua.LValue) {
 		if _, ok := k.(lua.LNumber); !ok {
-			arr = false
+			isArray = false
 		}
 	})
-	return arr
+	return isArray
 }
 
-func luaTableToJSONArray(L *lua.LState, t *lua.LTable) string {
-	var parts []string
-	t.ForEach(func(_, v lua.LValue) {
-		parts = append(parts, luaValueToJSON(L, v))
-	})
-	return "[" + strings.Join(parts, ",") + "]"
-}
-
-func luaTableToJSONObject(L *lua.LState, t *lua.LTable) string {
-	var parts []string
-	t.ForEach(func(k, v lua.LValue) {
-		key := lua.LVAsString(k)
-		parts = append(parts, `"`+jsonEscape(key)+`":`+luaValueToJSON(L, v))
-	})
-	return "{" + strings.Join(parts, ",") + "}"
-}
-
-func jsonEscape(s string) string {
-	b, _ := json.Marshal(s)
-	// b includes surrounding quotes; strip them.
-	return string(b[1 : len(b)-1])
-}
-
-// jsonToLua parses a JSON string and returns a Lua value.
 func jsonToLua(L *lua.LState, s string) (lua.LValue, error) {
 	var raw any
 	if err := json.Unmarshal([]byte(s), &raw); err != nil {
@@ -442,19 +526,15 @@ func goValueToLua(L *lua.LState, v any) lua.LValue {
 	}
 }
 
-// extractJSON finds a JSON value in a string, handling code fences and
-// surrounding prose.
 func extractJSON(s string) (string, error) {
 	s = strings.TrimSpace(s)
 
-	if strings.HasPrefix(s, "```json") {
-		s = strings.TrimPrefix(s, "```json")
-		s = strings.TrimPrefix(s, "\n")
+	if prefix, ok := strings.CutPrefix(s, "```json"); ok {
+		s = strings.TrimSpace(prefix)
 		s = strings.TrimSuffix(s, "```")
 		s = strings.TrimSpace(s)
-	} else if strings.HasPrefix(s, "```") {
-		s = strings.TrimPrefix(s, "```")
-		s = strings.TrimPrefix(s, "\n")
+	} else if prefix, ok := strings.CutPrefix(s, "```"); ok {
+		s = strings.TrimSpace(prefix)
 		s = strings.TrimSuffix(s, "```")
 		s = strings.TrimSpace(s)
 	}

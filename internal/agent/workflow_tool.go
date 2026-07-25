@@ -96,7 +96,6 @@ func (c *coordinator) workflowTool(ctx context.Context) (fantasy.AgentTool, erro
 					ToolCallID:     fmt.Sprintf("%s-a%d", call.ID, index),
 					Prompt:         prompt,
 					SessionTitle:   title,
-					SessionSetup:   func(id string) { c.permissions.AutoApproveSession(id) },
 				})
 				if err != nil {
 					return "", err

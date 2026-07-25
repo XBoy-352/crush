@@ -11,15 +11,15 @@ A workflow allows you to write and execute a Lua orchestration script to run a f
 
 ## Script API
 
-You must write **plain synchronous Lua only**. There is no async, require, filesystem access, or network access.
+You must write **plain synchronous Lua only**. The sandbox exposes only `base`, `table`, `string`, and `math` libraries — no `os`, `io`, `require`, `debug`, `dofile`, or `loadfile`.
 
 | Lua call | behavior |
 |---|---|
 | `agent(prompt)` | blocks, returns string. Throws on: empty/non-string prompt, agent cap exceeded, spawn error, cancellation. |
-| `agent(prompt, {json = true})` | as above; result passed through JSON extractor; throws (catchable via pcall) if no JSON value found. |
-| `parallel(calls)` | `calls`: non-empty array (1-indexed table) of `{prompt = string, label = string, json = bool}` tables. Validates ALL entries and the cap **before** starting any. Returns array (input order) of `{ok = true, value, label}` or `{ok = false, error = string, label}`. Throws only on validation/cap failure or cancellation. |
-| `log(msg)` | coerces to string, truncates to 2048 bytes, keeps first 200 entries (appends `"(further logs dropped)"` once). |
-| `return <value>` | value must be JSON-serializable; becomes the workflow return value. |
+| `agent(prompt, {label = "...", json = true})` | `label` sets the display title; `json = true` passes the result through a JSON extractor (throws if no JSON found). |
+| `parallel(calls)` | `calls`: non-empty 1-indexed table of `{prompt = string, label = string, json = bool}`. Validates ALL entries and the cap **before** starting any. Returns table (input order) of `{ok = true, value, label}` or `{ok = false, error = string, label}`. Individual spawn errors become `{ok = false}` entries; only validation/cap failures throw. |
+| `log(msg)` | coerces to string via Lua tostring (tables become empty string), truncates to 2048 bytes, keeps first 200 entries. |
+| `return <value>` | value must be JSON-serializable; becomes the workflow return value. Empty tables `{}` serialize as `[]`. |
 
 ## Examples
 
@@ -71,6 +71,8 @@ return items
 ## Constraints and Caps
 - **Max Agents**: 100 agents per workflow.
 - **Max Concurrent**: 5 agents running concurrently.
+- **Max Script Size**: 64 KiB.
+- **Timeout**: 5 minutes wall-clock per workflow.
 - Prefer one `parallel` round per stage. Put data transforms between rounds in plain Lua.
 - You must always `return` a JSON-serializable summary.
 - Use `pcall` to catch errors from `agent()` and `parallel()`.
