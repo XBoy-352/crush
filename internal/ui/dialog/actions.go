@@ -1,6 +1,7 @@
 package dialog
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
@@ -45,13 +46,15 @@ type ActionSelectModel struct {
 
 // Messages for commands
 type (
-	ActionNewSession              struct{}
-	ActionToggleHelp              struct{}
-	ActionToggleCompactMode       struct{}
-	ActionToggleThinking          struct{}
-	ActionTogglePills             struct{}
-	ActionExternalEditor          struct{}
-	ActionToggleYoloMode          struct{}
+	ActionNewSession        struct{}
+	ActionToggleHelp        struct{}
+	ActionToggleCompactMode struct{}
+	ActionToggleThinking    struct{}
+	ActionTogglePills       struct{}
+	ActionExternalEditor    struct{}
+	ActionToggleYoloMode    struct{}
+	// ActionTogglePlanMode toggles plan mode on/off.
+	ActionTogglePlanMode          struct{}
 	ActionToggleNotifications     struct{}
 	ActionSelectNotificationStyle struct {
 		Style string
@@ -112,6 +115,29 @@ type (
 	ActionSelectRevertMessage struct {
 		MessageID      string
 		MessageContent string
+	}
+)
+
+// Messages for MCP OAuth authentication dialog.
+type (
+	// ActionMCPAuthStarted is sent when the user approves authentication
+	// for an MCP server. The UI should initiate the actual auth flow
+	// using the provided context, which the dialog will cancel if the
+	// user closes it.
+	ActionMCPAuthStarted struct {
+		Name string
+		Ctx  context.Context
+	}
+
+	// ActionMCPAuthComplete is sent when MCP authentication succeeds.
+	ActionMCPAuthComplete struct {
+		Name string
+	}
+
+	// ActionMCPAuthErrored is sent when MCP authentication fails.
+	ActionMCPAuthErrored struct {
+		Name  string
+		Error error
 	}
 )
 

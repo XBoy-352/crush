@@ -195,6 +195,18 @@ func (c *Client) SubscribeEvents(ctx context.Context, id string) (<-chan any, er
 				if !sendEvent(ctx, events, e) {
 					return
 				}
+			case pubsub.PayloadTypeQuestionRequest:
+				var e pubsub.Event[proto.QuestionRequest]
+				_ = json.Unmarshal(p.Payload, &e)
+				if !sendEvent(ctx, events, e) {
+					return
+				}
+			case pubsub.PayloadTypeQuestionNotification:
+				var e pubsub.Event[proto.QuestionNotification]
+				_ = json.Unmarshal(p.Payload, &e)
+				if !sendEvent(ctx, events, e) {
+					return
+				}
 			case pubsub.PayloadTypeMessage:
 				var e pubsub.Event[proto.Message]
 				_ = json.Unmarshal(p.Payload, &e)
@@ -523,8 +535,9 @@ func (c *Client) AgentSummarizeSession(ctx context.Context, id string, sessionID
 }
 
 // InitiateAgentProcessing triggers agent initialization on the server.
-func (c *Client) InitiateAgentProcessing(ctx context.Context, id string) error {
-	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/agent/init", id), nil, nil, nil)
+func (c *Client) InitiateAgentProcessing(ctx context.Context, id string, interactive bool) error {
+	body := jsonBody(proto.AgentInitRequest{Interactive: interactive})
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/agent/init", id), nil, body, http.Header{"Content-Type": []string{"application/json"}})
 	if err != nil {
 		return fmt.Errorf("failed to initiate session agent processing: %w", err)
 	}
@@ -641,6 +654,44 @@ func (c *Client) GrantPermission(ctx context.Context, id string, req proto.Permi
 	return resp.Resolved, nil
 }
 
+// AnswerQuestionBatch submits answers for a batch question on a
+// workspace. Returns true if this call resolved the pending
+// request, false if already resolved by another caller.
+func (c *Client) AnswerQuestionBatch(ctx context.Context, id string, req proto.QuestionAnswer) (bool, error) {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/questions/answer", id), nil, jsonBody(req), http.Header{"Content-Type": []string{"application/json"}})
+	if err != nil {
+		return false, fmt.Errorf("failed to answer question batch: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("failed to answer question batch: status code %d", rsp.StatusCode)
+	}
+	var resp proto.QuestionAnswerResponse
+	if err := json.NewDecoder(rsp.Body).Decode(&resp); err != nil {
+		return false, fmt.Errorf("failed to decode answer question batch response: %w", err)
+	}
+	return resp.Resolved, nil
+}
+
+// CancelQuestionBatch cancels the pending question batch on a
+// workspace. Returns true if a question was cancelled, false if
+// none was pending.
+func (c *Client) CancelQuestionBatch(ctx context.Context, id string) (bool, error) {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/questions/cancel", id), nil, nil, http.Header{})
+	if err != nil {
+		return false, fmt.Errorf("failed to cancel question batch: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("failed to cancel question batch: status code %d", rsp.StatusCode)
+	}
+	var resp proto.QuestionAnswerResponse
+	if err := json.NewDecoder(rsp.Body).Decode(&resp); err != nil {
+		return false, fmt.Errorf("failed to decode cancel question batch response: %w", err)
+	}
+	return resp.Resolved, nil
+}
+
 // SetPermissionsSkipRequests sets the skip-requests flag for a workspace.
 func (c *Client) SetPermissionsSkipRequests(ctx context.Context, id string, skip bool) error {
 	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/permissions/skip", id), nil, jsonBody(proto.PermissionSkipRequest{Skip: skip}), http.Header{"Content-Type": []string{"application/json"}})
@@ -669,6 +720,36 @@ func (c *Client) GetPermissionsSkipRequests(ctx context.Context, id string) (boo
 		return false, fmt.Errorf("failed to decode permissions skip requests: %w", err)
 	}
 	return skip.Skip, nil
+}
+
+// SetPermissionsPlanMode sets the plan-mode flag for a workspace.
+func (c *Client) SetPermissionsPlanMode(ctx context.Context, id string, enabled bool) error {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/permissions/plan", id), nil, jsonBody(proto.PermissionPlanModeRequest{Enabled: enabled}), http.Header{"Content-Type": []string{"application/json"}})
+	if err != nil {
+		return fmt.Errorf("failed to set permissions plan mode: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to set permissions plan mode: status code %d", rsp.StatusCode)
+	}
+	return nil
+}
+
+// GetPermissionsPlanMode retrieves the plan-mode flag for a workspace.
+func (c *Client) GetPermissionsPlanMode(ctx context.Context, id string) (bool, error) {
+	rsp, err := c.get(ctx, fmt.Sprintf("/workspaces/%s/permissions/plan", id), nil, nil)
+	if err != nil {
+		return false, fmt.Errorf("failed to get permissions plan mode: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("failed to get permissions plan mode: status code %d", rsp.StatusCode)
+	}
+	var req proto.PermissionPlanModeRequest
+	if err := json.NewDecoder(rsp.Body).Decode(&req); err != nil {
+		return false, fmt.Errorf("failed to decode permissions plan mode: %w", err)
+	}
+	return req.Enabled, nil
 }
 
 // GetConfig retrieves the workspace-specific configuration.

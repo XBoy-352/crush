@@ -19,6 +19,7 @@ import (
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/proto"
+	"github.com/charmbracelet/crush/internal/question"
 	"github.com/charmbracelet/crush/internal/revert"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/shell"
@@ -192,6 +193,13 @@ func (w *AppWorkspace) AgentIsReady() bool {
 	return w.app.AgentCoordinator != nil
 }
 
+func (w *AppWorkspace) AgentReadyErr() error {
+	if w.app.AgentCoordinator == nil {
+		return ErrAgentNotInitialized
+	}
+	return nil
+}
+
 func (w *AppWorkspace) AgentQueuedPrompts(sessionID string) int {
 	if w.app.AgentCoordinator == nil {
 		return 0
@@ -251,6 +259,10 @@ func (w *AppWorkspace) InitCoderAgent(ctx context.Context) error {
 	return w.app.InitCoderAgent(ctx)
 }
 
+func (w *AppWorkspace) InitCoderAgentNonInteractive(ctx context.Context) error {
+	return w.app.InitCoderAgentNonInteractive(ctx)
+}
+
 func (w *AppWorkspace) GetDefaultSmallModel(providerID string) config.SelectedModel {
 	return w.app.GetDefaultSmallModel(providerID)
 }
@@ -275,6 +287,24 @@ func (w *AppWorkspace) PermissionSkipRequests() bool {
 
 func (w *AppWorkspace) PermissionSetSkipRequests(skip bool) {
 	w.app.Permissions.SetSkipRequests(skip)
+}
+
+func (w *AppWorkspace) PermissionPlanMode() bool {
+	return w.app.Permissions.PlanMode()
+}
+
+func (w *AppWorkspace) PermissionSetPlanMode(enabled bool) {
+	w.app.Permissions.SetPlanMode(enabled)
+}
+
+// -- Questions --
+
+func (w *AppWorkspace) QuestionAnswer(responses []question.Answer) bool {
+	return w.app.Questions.Answer(responses)
+}
+
+func (w *AppWorkspace) QuestionCancel() bool {
+	return w.app.Questions.Cancel()
 }
 
 // -- FileTracker --
@@ -375,7 +405,11 @@ func (w *AppWorkspace) SetCompactMode(scope config.Scope, enabled bool) error {
 }
 
 func (w *AppWorkspace) SetProviderAPIKey(scope config.Scope, providerID string, apiKey any) error {
-	return w.store.SetProviderAPIKey(scope, providerID, apiKey)
+	if err := w.store.SetProviderAPIKey(scope, providerID, apiKey); err != nil {
+		return err
+	}
+	w.store.SignalAuthComplete(providerID)
+	return nil
 }
 
 func (w *AppWorkspace) SetConfigField(scope config.Scope, key string, value any) error {
@@ -453,6 +487,10 @@ func (w *AppWorkspace) ReadMCPResource(ctx context.Context, name, uri string) ([
 	return result, nil
 }
 
+func (w *AppWorkspace) ListMCPPrompts(context.Context) ([]commands.MCPPrompt, error) {
+	return commands.LoadMCPPrompts()
+}
+
 func (w *AppWorkspace) GetMCPPrompt(clientID, promptID string, args map[string]string) (string, error) {
 	return commands.GetMCPPrompt(w.store, clientID, promptID, args)
 }
@@ -483,6 +521,18 @@ func (w *AppWorkspace) DisableDockerMCP() error {
 		return fmt.Errorf("failed to disable docker MCP: %w", err)
 	}
 	return w.store.DisableDockerMCP()
+}
+
+func (w *AppWorkspace) MCPAuthenticate(ctx context.Context, name string) error {
+	return mcptools.AuthenticateMCP(ctx, w.store, name)
+}
+
+func (w *AppWorkspace) MCPPendingAuth() []mcptools.PendingAuthServer {
+	return mcptools.PendingAuthMCPs(w.store)
+}
+
+func (w *AppWorkspace) MCPAuthURL(name string) string {
+	return mcptools.MCPAuthURL(name)
 }
 
 // -- Lifecycle --
