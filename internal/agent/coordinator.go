@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
@@ -114,8 +113,6 @@ type coordinator struct {
 	history     history.Service
 	filetracker filetracker.Service
 	lspManager  *lsp.Manager
-
-	costMu      sync.Mutex
 	notify      pubsub.Publisher[notify.Notification]
 	runComplete pubsub.Publisher[notify.RunComplete]
 
@@ -640,14 +637,6 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 			return nil, err
 		}
 		allTools = append(allTools, agenticFetchTool)
-	}
-
-	if slices.Contains(agent.AllowedTools, WorkflowToolName) {
-		workflowTool, err := c.workflowTool(ctx)
-		if err != nil {
-			return nil, err
-		}
-		allTools = append(allTools, workflowTool)
 	}
 
 	// Get the model name for the agent
@@ -1394,8 +1383,6 @@ func subAgentOutput(result *fantasy.AgentResult) string {
 
 // updateParentSessionCost accumulates the cost from a child session to its parent session.
 func (c *coordinator) updateParentSessionCost(ctx context.Context, childSessionID, parentSessionID string) error {
-	c.costMu.Lock()
-	defer c.costMu.Unlock()
 	childSession, err := c.sessions.Get(ctx, childSessionID)
 	if err != nil {
 		return fmt.Errorf("get child session: %w", err)

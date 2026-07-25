@@ -769,7 +769,6 @@ func allToolNames() []string {
 		"write",
 		"list_mcp_resources",
 		"read_mcp_resource",
-		"workflow",
 	}
 }
 
