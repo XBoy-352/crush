@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"charm.land/bubbletea/v2"
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/tree"
 
