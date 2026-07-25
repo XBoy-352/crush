@@ -16,11 +16,15 @@ import (
 const (
 	DefaultMaxConcurrent = 5
 	DefaultMaxAgents     = 100
-	DefaultTimeout       = 5 * time.Minute
-	MaxScriptBytes       = 64 * 1024
-	maxLogEntries        = 200
-	maxLogEntryBytes     = 2048
-	maxJSONDepth         = 100
+	// DefaultTimeout must leave the agent cap actually reachable: 100 agents at
+	// concurrency 5 is 20 sequential batches, and a real subagent turn runs tens
+	// of seconds. It is a runaway backstop, not the primary bound -- MaxAgents
+	// bounds total work, and the caller's context cancels an interrupted run.
+	DefaultTimeout   = 30 * time.Minute
+	MaxScriptBytes   = 64 * 1024
+	maxLogEntries    = 200
+	maxLogEntryBytes = 2048
+	maxJSONDepth     = 100
 )
 
 // SpawnFunc runs one subagent. index is the global 0-based agent index

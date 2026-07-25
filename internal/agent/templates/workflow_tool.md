@@ -72,7 +72,7 @@ return items
 - **Max Agents**: 100 agents per workflow.
 - **Max Concurrent**: 5 agents running concurrently.
 - **Max Script Size**: 64 KiB.
-- **Timeout**: 5 minutes wall-clock per workflow.
+- **Timeout**: 30 minutes wall-clock per workflow.
 - Prefer one `parallel` round per stage. Put data transforms between rounds in plain Lua.
 - You must always `return` a JSON-serializable summary.
 - Use `pcall` to catch errors from `agent()` and `parallel()`.
