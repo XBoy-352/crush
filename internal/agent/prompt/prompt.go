@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/home"
@@ -245,8 +246,11 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 }
 
 // maxMemoryIndexBytes caps the MEMORY.md snippet injected into the system
-// prompt so a large or poisoned index cannot blow up launch.
-const maxMemoryIndexBytes = 16 * 1024
+// prompt so a large or poisoned index cannot blow up launch. It is the same
+// budget the memory_write tool enforces when it writes MEMORY.md, so a
+// tool-written index never truncates here; this only backstops an index
+// written by hand or by an older build.
+const maxMemoryIndexBytes = tools.MaxMemoryIndexBytes
 
 // loadMemoryIndex reads at most maxMemoryIndexBytes+1 from path and, when
 // truncated, backs up to a UTF-8 rune boundary before appending a marker.

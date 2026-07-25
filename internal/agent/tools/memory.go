@@ -28,6 +28,13 @@ const (
 	memoryIndexFileName   = "MEMORY.md"
 )
 
+// MaxMemoryIndexBytes bounds MEMORY.md. The prompt layer injects the index
+// verbatim into the system prompt and truncates anything past this budget,
+// so the writer has to enforce the same budget the reader does. Otherwise a
+// save reports success and lands on disk while its index entry falls off the
+// end of the prompt, leaving the memory permanently invisible to the model.
+const MaxMemoryIndexBytes = 16 * 1024
+
 type MemoryWriteParams struct {
 	Action      string `json:"action" description:"save (create or overwrite) or delete"`
 	Name        string `json:"name" description:"Memory slug: lowercase letters, digits, hyphens (e.g. build-commands)"`
@@ -89,12 +96,43 @@ func NewMemoryTool(dataDir string) fantasy.AgentTool {
 					return fantasy.ToolResponse{}, fmt.Errorf("stat memory file: %w", err)
 				}
 
+				// Remember the prior state so an over-budget index can be
+				// rolled back below.
+				prev, hadPrev := []byte(nil), false
+				if b, err := os.ReadFile(path); err == nil {
+					prev, hadPrev = b, true
+				}
+
 				body := formatMemoryFile(params.Description, params.Content)
 				if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 					return fantasy.ToolResponse{}, fmt.Errorf("write memory file: %w", err)
 				}
 
-				if err := regenerateMemoryIndex(memoryDir); err != nil {
+				index, err := renderMemoryIndex(memoryDir)
+				if err != nil {
+					return fantasy.ToolResponse{}, fmt.Errorf("render memory index: %w", err)
+				}
+				if len(index) > MaxMemoryIndexBytes {
+					// The prompt layer would truncate this entry away, so the
+					// save would silently do nothing. Undo it and say so.
+					if hadPrev {
+						err = os.WriteFile(path, prev, 0o644)
+					} else {
+						err = os.Remove(path)
+					}
+					if err != nil {
+						return fantasy.ToolResponse{}, fmt.Errorf("roll back memory file: %w", err)
+					}
+					if err := regenerateMemoryIndex(memoryDir); err != nil {
+						return fantasy.ToolResponse{}, fmt.Errorf("regenerate memory index: %w", err)
+					}
+					return fantasy.NewTextErrorResponse(fmt.Sprintf(
+						"memory index would exceed %d bytes and this memory would not be visible to future sessions; not saved. Shorten the description, or delete or consolidate existing memories first",
+						MaxMemoryIndexBytes,
+					)), nil
+				}
+
+				if err := writeMemoryIndex(memoryDir, index); err != nil {
 					return fantasy.ToolResponse{}, fmt.Errorf("regenerate memory index: %w", err)
 				}
 
@@ -152,12 +190,30 @@ func countMemoryFiles(memoryDir string) (int, error) {
 // regenerateMemoryIndex rebuilds MEMORY.md from a directory scan of
 // individual memory files. MEMORY.md is never the source of truth.
 func regenerateMemoryIndex(memoryDir string) error {
+	index, err := renderMemoryIndex(memoryDir)
+	if err != nil {
+		return err
+	}
+	return writeMemoryIndex(memoryDir, index)
+}
+
+func writeMemoryIndex(memoryDir, index string) error {
+	if index == "" {
+		return nil
+	}
+	return os.WriteFile(filepath.Join(memoryDir, memoryIndexFileName), []byte(index), 0o644)
+}
+
+// renderMemoryIndex builds the MEMORY.md body from a directory scan without
+// writing it, so callers can check it against MaxMemoryIndexBytes first. It
+// returns "" when the memory directory does not exist.
+func renderMemoryIndex(memoryDir string) (string, error) {
 	entries, err := os.ReadDir(memoryDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return "", nil
 		}
-		return err
+		return "", err
 	}
 
 	type memoryEntry struct {
@@ -177,7 +233,7 @@ func regenerateMemoryIndex(memoryDir string) error {
 		slug := strings.TrimSuffix(name, ".md")
 		b, err := os.ReadFile(filepath.Join(memoryDir, name))
 		if err != nil {
-			return err
+			return "", err
 		}
 		desc := extractMemoryDescription(string(b), slug)
 		memories = append(memories, memoryEntry{name: slug, description: desc})
@@ -193,7 +249,7 @@ func regenerateMemoryIndex(memoryDir string) error {
 		fmt.Fprintf(&sb, "- %s: %s\n", m.name, m.description)
 	}
 
-	return os.WriteFile(filepath.Join(memoryDir, memoryIndexFileName), []byte(sb.String()), 0o644)
+	return sb.String(), nil
 }
 
 // extractMemoryDescription returns the description: frontmatter value,

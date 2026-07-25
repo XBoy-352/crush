@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -247,6 +248,61 @@ func TestMemoryWriteIndexSortedAndSlugFallback(t *testing.T) {
 	index, err := os.ReadFile(filepath.Join(memoryDir, "MEMORY.md"))
 	require.NoError(t, err)
 	require.Equal(t, "# Memory index\n\n- alpha: first\n- zebra: zebra\n", string(index))
+}
+
+// The tool must never report a save it will not show the model. Filling the
+// store at the tool's own advertised per-file limits used to produce a ~27KiB
+// MEMORY.md, of which prompt.go injects only the first 16KiB — the tail of the
+// alphabet was saved to disk yet permanently invisible.
+func TestMemoryWriteIndexStaysWithinPromptBudget(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	memoryDir := filepath.Join(dataDir, "memory")
+
+	saved := []string{}
+	rejected := 0
+	for i := range maxMemoryFiles {
+		suffix := fmt.Sprintf("-%03d", i)
+		name := strings.Repeat("a", 64-len(suffix)) + suffix
+		resp := runMemoryTool(t, dataDir, MemoryWriteParams{
+			Action:      "save",
+			Name:        name,
+			Description: strings.Repeat("d", maxMemoryDescription),
+			Content:     "body",
+		})
+		if resp.IsError {
+			require.Contains(t, resp.Content, "memory index would exceed")
+			rejected++
+			// A rejected save must leave nothing behind.
+			_, err := os.Stat(filepath.Join(memoryDir, name+".md"))
+			require.True(t, os.IsNotExist(err), "rejected save left an orphan file for %s", name)
+			continue
+		}
+		saved = append(saved, name)
+	}
+	index, err := os.ReadFile(filepath.Join(memoryDir, memoryIndexFileName))
+	require.NoError(t, err)
+	require.LessOrEqual(t, len(index), MaxMemoryIndexBytes,
+		"MEMORY.md (%d bytes) exceeds the %d-byte budget prompt.go injects, so %d of %d saves are invisible to the model",
+		len(index), MaxMemoryIndexBytes,
+		len(saved)-strings.Count(loadIndexAsPromptWould(string(index)), "\n- "), len(saved))
+	require.Positive(t, rejected, "expected the budget to be reached within %d files", maxMemoryFiles)
+
+	// Everything the tool said it saved must actually be in the index, and in
+	// the part of it the prompt layer keeps.
+	visible := loadIndexAsPromptWould(string(index))
+	for _, name := range saved {
+		require.Contains(t, visible, "- "+name+": ",
+			"tool reported saving %s but it is not visible in the prompt index", name)
+	}
+}
+
+// loadIndexAsPromptWould mirrors the truncation prompt.loadMemoryIndex applies.
+func loadIndexAsPromptWould(index string) string {
+	if len(index) <= MaxMemoryIndexBytes {
+		return index
+	}
+	return index[:MaxMemoryIndexBytes]
 }
 
 func TestMemoryWriteInvalidAction(t *testing.T) {
