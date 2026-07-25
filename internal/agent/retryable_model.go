@@ -73,52 +73,63 @@ func (m *retryableLanguageModel) Stream(ctx context.Context, call fantasy.Call) 
 	}
 	return func(yield func(fantasy.StreamPart) bool) {
 		defer cancelIdle()
-		next, stop := iter.Pull(stream)
-		defer stop()
 
-		type pullResult struct {
-			part fantasy.StreamPart
-			ok   bool
-		}
+		// One long-lived puller feeds this loop, and one timer is reused
+		// across parts. Spawning a goroutine plus a channel plus a timer
+		// per part costs ~6 allocations and ~640B of churn for every
+		// streamed token, which is unacceptable on a long response.
+		//
+		// iter.Pull's stop must not run concurrently with next, so the
+		// puller goroutine owns both. When this loop returns, close(done)
+		// releases a puller blocked on the send and cancelIdle releases a
+		// puller blocked inside the provider.
+		parts := make(chan fantasy.StreamPart)
+		done := make(chan struct{})
+		defer close(done)
+		go func() {
+			next, stop := iter.Pull(stream)
+			defer stop()
+			defer close(parts)
+			for {
+				part, ok := next()
+				if !ok {
+					return
+				}
+				select {
+				case parts <- part:
+				case <-done:
+					return
+				}
+			}
+		}()
+
+		timer := time.NewTimer(streamIdleTimeout)
+		defer timer.Stop()
 
 		for {
-			ch := make(chan pullResult, 1)
-			go func() {
-				part, ok := next()
-				ch <- pullResult{part: part, ok: ok}
-			}()
-
-			timer := time.NewTimer(streamIdleTimeout)
-			var res pullResult
 			select {
 			case <-ctx.Done():
-				timer.Stop()
-				cancelIdle()
-				// Drain the in-flight pull so stop() does not hang.
-				<-ch
 				return
 			case <-timer.C:
-				timer.Stop()
 				cancelIdle()
-				// Drain so stop() can return after the provider unblocks.
-				<-ch
 				_ = yield(fantasy.StreamPart{
 					Type:  fantasy.StreamPartTypeError,
 					Error: idleStreamTimeoutError(),
 				})
 				return
-			case res = <-ch:
-				timer.Stop()
-			}
-
-			if !res.ok {
-				return
-			}
-			if res.part.Type == fantasy.StreamPartTypeError && res.part.Error != nil {
-				res.part.Error = mapRetryableStreamErr(res.part.Error)
-			}
-			if !yield(res.part) {
-				return
+			case part, ok := <-parts:
+				if !ok {
+					return
+				}
+				if part.Type == fantasy.StreamPartTypeError && part.Error != nil {
+					part.Error = mapRetryableStreamErr(part.Error)
+				}
+				if !yield(part) {
+					return
+				}
+				// Go 1.23+ timer semantics: Reset after a receive from a
+				// different case cannot deliver a stale tick.
+				timer.Reset(streamIdleTimeout)
 			}
 		}
 	}, nil

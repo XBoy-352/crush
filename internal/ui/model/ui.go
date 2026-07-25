@@ -4706,7 +4706,11 @@ func (m *UI) beginRetryCountdown(n notify.Notification) tea.Cmd {
 // clearRetryCountdown stops any in-flight retry countdown and restores
 // the default working spinner label.
 func (m *UI) clearRetryCountdown() {
-	if m.retrySeq == 0 && m.retryStatus.Type == "" {
+	// Only a live countdown may be cleared. This runs on every agent
+	// finish/error, so a looser guard (e.g. "retrySeq != 0") would wipe
+	// an unrelated status message on every turn after the session's
+	// first retry.
+	if m.retryStatus.Type != notify.TypeRetry {
 		return
 	}
 	m.retrySeq++

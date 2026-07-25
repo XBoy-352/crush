@@ -1153,3 +1153,44 @@ func TestTodoSystemReminder(t *testing.T) {
 		require.Empty(t, got)
 	})
 }
+
+// TestProviderRetryBudgetIsBounded runs fantasy's real retry middleware
+// (scaled down 1000x) to measure the worst-case wall time a user can be
+// made to wait on providerMaxRetries. Fantasy's backoff is uncapped
+// exponential and offers no maximum-delay knob, so the retry count is
+// the only lever Crush has; a budget large enough to produce a
+// 40-minute countdown is indistinguishable from a hang.
+func TestProviderRetryBudgetIsBounded(t *testing.T) {
+	t.Parallel()
+
+	defaults := fantasy.DefaultRetryOptions()
+	const scale = 1000
+	opts := fantasy.RetryOptions{
+		MaxRetries:     providerMaxRetries,
+		InitialDelayIn: defaults.InitialDelayIn / scale,
+		BackoffFactor:  defaults.BackoffFactor,
+	}
+	var attempts int
+	var scaledTotal, scaledLongest time.Duration
+	opts.OnRetry = func(_ *fantasy.ProviderError, delay time.Duration) {
+		attempts++
+		scaledTotal += delay
+		scaledLongest = delay
+	}
+	retry := fantasy.RetryWithExponentialBackoffRespectingRetryHeaders[int](opts)
+	_, err := retry(t.Context(), func() (int, error) {
+		return 0, &fantasy.ProviderError{Title: "rate limit", StatusCode: 429}
+	})
+	require.Error(t, err)
+	require.Equal(t, providerMaxRetries, attempts)
+
+	total := scaledTotal * scale
+	longest := scaledLongest * scale
+	t.Logf("providerMaxRetries=%d longest single wait=%v total wall time=%v",
+		providerMaxRetries, longest, total)
+
+	require.LessOrEqual(t, longest, 3*time.Minute,
+		"longest single backoff (%v) leaves the user watching a countdown with no way to tell Crush from a hang", longest)
+	require.LessOrEqual(t, total, 6*time.Minute,
+		"worst-case total retry wall time is %v", total)
+}

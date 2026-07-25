@@ -53,9 +53,17 @@ import (
 // providerMaxRetries is how many times a failed provider request is
 // retried before the error is surfaced. Fantasy defaults to 3; Crush
 // raises this so transient rate limits and network blips recover more
-// often. Combined with exponential backoff (and Retry-After headers),
-// the wait is still cancelable with Escape / Ctrl+C.
-const providerMaxRetries = 10
+// often. The wait is cancelable with Escape / Ctrl+C.
+//
+// This number is bounded, not tuned for maximum persistence. Fantasy's
+// backoff is uncapped exponential (5s initial, x2 per attempt, see
+// fantasy.DefaultRetryOptions), so the worst-case wall time grows as
+// 5s*(2^n-1): n=6 gives a 2m40s longest single wait and 5m15s total,
+// while n=10 would give 42m40s and 1h25m15s. A user staring at a
+// 42-minute countdown is indistinguishable from a hang, so the budget
+// is capped here. TestProviderRetryBudgetIsBounded enforces the bound;
+// raise it only alongside a delay cap in fantasy.
+const providerMaxRetries = 6
 
 const (
 	DefaultSessionName = "Untitled Session"
