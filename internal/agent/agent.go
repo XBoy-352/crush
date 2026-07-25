@@ -819,7 +819,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		a.publishRunComplete(ctx, call, complete)
 	}()
 
-	history, files := a.preparePrompt(msgs, largeModel.CatwalkCfg.SupportsImages, call.Attachments...)
+	history, files := a.preparePrompt(msgs, largeModel.CatwalkCfg.SupportsImages, currentSession.Todos, call.Attachments...)
 
 	startTime := time.Now()
 	a.eventPromptSent(call.SessionID)
@@ -1387,7 +1387,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		return nil
 	}
 
-	aiMsgs, _ := a.preparePrompt(msgs, largeModel.CatwalkCfg.SupportsImages)
+	aiMsgs, _ := a.preparePrompt(msgs, largeModel.CatwalkCfg.SupportsImages, currentSession.Todos)
 
 	genCtx, cancel := context.WithCancel(ctx)
 	ac := &activeCancel{cancel: cancel}
@@ -1571,16 +1571,11 @@ func (a *sessionAgent) createUserMessage(ctx context.Context, call SessionAgentC
 	return msg, nil
 }
 
-func (a *sessionAgent) preparePrompt(msgs []message.Message, supportsImages bool, attachments ...message.Attachment) ([]fantasy.Message, []fantasy.FilePart) {
+func (a *sessionAgent) preparePrompt(msgs []message.Message, supportsImages bool, todos []session.Todo, attachments ...message.Attachment) ([]fantasy.Message, []fantasy.FilePart) {
 	var history []fantasy.Message
-	if !a.isSubAgent {
+	if reminder := todoSystemReminder(a.isSubAgent, todos); reminder != "" {
 		history = append(history, fantasy.NewUserMessage(
-			fmt.Sprintf(
-				"<system_reminder>%s</system_reminder>",
-				`This is a reminder that your todo list is currently empty. DO NOT mention this to the user explicitly because they are already aware.
-If you are working on tasks that would benefit from a todo list please use the "todos" tool to create one.
-If not, please feel free to ignore. Again do not mention this message to the user.`,
-			),
+			fmt.Sprintf("<system_reminder>%s</system_reminder>", reminder),
 		))
 	}
 	// Collect all tool call IDs present in assistant messages and all tool
@@ -1829,7 +1824,7 @@ func (a *sessionAgent) SideQuestion(ctx context.Context, sessionID, question str
 
 	var lastErr error
 	for i, chosen := range attempts {
-		aiMsgs, _ := a.preparePrompt(msgs, chosen.CatwalkCfg.SupportsImages)
+		aiMsgs, _ := a.preparePrompt(msgs, chosen.CatwalkCfg.SupportsImages, sess.Todos)
 		for _, ex := range exchanges {
 			q := strings.TrimSpace(ex.Question)
 			ans := strings.TrimSpace(ex.Answer)
@@ -2399,6 +2394,45 @@ func (a *sessionAgent) workaroundProviderMediaLimitations(messages []fantasy.Mes
 }
 
 // buildSummaryPrompt constructs the prompt text for session summarization.
+
+// todoSystemReminder returns a prompt-only reminder about the session
+// todo list. Empty when there is nothing useful to say (sub-agents, or
+// a healthy in-progress list). Incomplete lists that have no current
+// in_progress item, and lists where every item is already completed,
+// get an explicit nudge so the UI pill does not linger after the work
+// is done. An empty list only gets the optional "consider creating"
+// hint.
+func todoSystemReminder(isSubAgent bool, todos []session.Todo) string {
+	if isSubAgent {
+		return ""
+	}
+	if len(todos) == 0 {
+		return `This is a reminder that your todo list is currently empty. DO NOT mention this to the user explicitly because they are already aware.
+If you are working on tasks that would benefit from a todo list please use the "todos" tool to create one.
+If not, please feel free to ignore. Again do not mention this message to the user.`
+	}
+
+	completed := 0
+	inProgress := 0
+	for _, t := range todos {
+		switch t.Status {
+		case session.TodoStatusCompleted:
+			completed++
+		case session.TodoStatusInProgress:
+			inProgress++
+		}
+	}
+
+	switch {
+	case completed == len(todos):
+		return `Your todo list is fully completed but still visible in the UI. Call the todos tool with an empty todos array to clear it. DO NOT mention this reminder to the user.`
+	case inProgress == 0:
+		return `Your todo list still has unfinished items and none are marked in_progress. Mark the next task in_progress before continuing, or complete remaining work and clear the list with an empty todos array when finished. DO NOT mention this reminder to the user.`
+	default:
+		return ""
+	}
+}
+
 func buildSummaryPrompt(todos []session.Todo) string {
 	var sb strings.Builder
 	sb.WriteString("Provide a detailed summary of our conversation above.")

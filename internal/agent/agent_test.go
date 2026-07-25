@@ -692,7 +692,7 @@ func TestPreparePrompt_FiltersImageAttachments(t *testing.T) {
 
 	// When supportsImages is false, image attachments should be stripped
 	// from history AND from the files list.
-	history, files := agent.preparePrompt(msgs, false, imageAtt)
+	history, files := agent.preparePrompt(msgs, false, nil, imageAtt)
 	// First message is the system reminder, second is the user message.
 	require.Len(t, history, 2)
 	require.Len(t, history[1].Content, 1)
@@ -704,7 +704,7 @@ func TestPreparePrompt_FiltersImageAttachments(t *testing.T) {
 
 	// When supportsImages is true, image attachments should remain in
 	// history and be included in the files list.
-	history, files = agent.preparePrompt(msgs, true, imageAtt)
+	history, files = agent.preparePrompt(msgs, true, nil, imageAtt)
 	require.Len(t, history, 2)
 	require.Len(t, history[1].Content, 2)
 	text, ok = fantasy.AsMessagePart[fantasy.TextPart](history[1].Content[0])
@@ -801,7 +801,7 @@ func TestPreparePrompt_OrphanedToolUse(t *testing.T) {
 	msgs, err := env.messages.List(ctx, sess.ID)
 	require.NoError(t, err)
 
-	history, _ := agent.preparePrompt(msgs, true)
+	history, _ := agent.preparePrompt(msgs, true, nil)
 
 	// The history must contain a synthetic tool result for the orphaned call.
 	found := false
@@ -875,7 +875,7 @@ func TestPreparePrompt_OrphanedToolUseMixed(t *testing.T) {
 	msgs, err := env.messages.List(ctx, sess.ID)
 	require.NoError(t, err)
 
-	history, _ := agent.preparePrompt(msgs, true)
+	history, _ := agent.preparePrompt(msgs, true, nil)
 
 	// Should have a synthetic result only for the orphaned call.
 	var syntheticCount int
@@ -1111,4 +1111,45 @@ func TestFormatRetryStatus(t *testing.T) {
 			MaxRetries: 10,
 		}, 200*time.Millisecond),
 	)
+}
+
+func TestTodoSystemReminder(t *testing.T) {
+	t.Parallel()
+
+	t.Run("sub agent never reminded", func(t *testing.T) {
+		t.Parallel()
+		require.Empty(t, todoSystemReminder(true, nil))
+		require.Empty(t, todoSystemReminder(true, []session.Todo{{Status: session.TodoStatusCompleted}}))
+	})
+
+	t.Run("empty list gets create hint", func(t *testing.T) {
+		t.Parallel()
+		got := todoSystemReminder(false, nil)
+		require.Contains(t, got, "currently empty")
+	})
+
+	t.Run("all completed nudges clear", func(t *testing.T) {
+		t.Parallel()
+		got := todoSystemReminder(false, []session.Todo{
+			{Content: "a", Status: session.TodoStatusCompleted},
+		})
+		require.Contains(t, got, "fully completed")
+		require.Contains(t, got, "empty todos array")
+	})
+
+	t.Run("incomplete without in_progress nudges", func(t *testing.T) {
+		t.Parallel()
+		got := todoSystemReminder(false, []session.Todo{
+			{Content: "a", Status: session.TodoStatusPending},
+		})
+		require.Contains(t, got, "none are marked in_progress")
+	})
+
+	t.Run("healthy in_progress is silent", func(t *testing.T) {
+		t.Parallel()
+		got := todoSystemReminder(false, []session.Todo{
+			{Content: "a", Status: session.TodoStatusInProgress},
+		})
+		require.Empty(t, got)
+	})
 }
