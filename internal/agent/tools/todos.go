@@ -15,7 +15,7 @@ var todosDescription string
 const TodosToolName = "todos"
 
 type TodosParams struct {
-	Todos []TodoItem `json:"todos" description:"The updated todo list. Pass an empty array to clear the list when all work is done."`
+	Todos []TodoItem `json:"todos" description:"The updated todo list. Pass an empty array to clear the list when all work is done. A list where every item is completed is cleared automatically."`
 }
 
 type TodoItem struct {
@@ -31,8 +31,12 @@ type TodosResponseMetadata struct {
 	JustStarted   string         `json:"just_started,omitempty"`
 	Completed     int            `json:"completed"`
 	Total         int            `json:"total"`
-	// Cleared is true when the tool call emptied a previously non-empty list.
+	// Cleared is true when the list was emptied (explicit empty update or
+	// auto-clear after every item was marked completed).
 	Cleared bool `json:"cleared,omitempty"`
+	// AutoCleared is true when the list was cleared because every submitted
+	// item was completed, rather than because the model passed [].
+	AutoCleared bool `json:"auto_cleared,omitempty"`
 }
 
 func NewTodosTool(sessions session.Service) fantasy.AgentTool {
@@ -99,6 +103,18 @@ func NewTodosTool(sessions session.Service) fantasy.AgentTool {
 				}
 			}
 
+			// When every submitted item is completed, clear the list so the
+			// UI pill cannot linger on a finished job. Models often mark the
+			// last task completed and stop without a second clear call.
+			autoCleared := len(todos) > 0 && completedCount == len(todos)
+			explicitClear := hadTodos && len(todos) == 0
+			if autoCleared {
+				todos = nil
+				completedCount = 0
+				inProgressCount = 0
+				justStarted = ""
+			}
+
 			// Persist nil rather than empty slice so JSON/DB treat a cleared
 			// list the same as a session that never had todos.
 			if len(todos) == 0 {
@@ -111,8 +127,8 @@ func NewTodosTool(sessions session.Service) fantasy.AgentTool {
 				return fantasy.ToolResponse{}, fmt.Errorf("failed to save todos: %w", err)
 			}
 
-			cleared := hadTodos && len(todos) == 0
-			response := buildTodosResponse(todos, completedCount, inProgressCount, cleared)
+			cleared := explicitClear || autoCleared
+			response := buildTodosResponse(todos, completedCount, inProgressCount, cleared, autoCleared, justCompleted)
 
 			metadata := TodosResponseMetadata{
 				IsNew:         isNew,
@@ -122,6 +138,7 @@ func NewTodosTool(sessions session.Service) fantasy.AgentTool {
 				Completed:     completedCount,
 				Total:         len(todos),
 				Cleared:       cleared,
+				AutoCleared:   autoCleared,
 			}
 
 			return fantasy.WithResponseMetadata(fantasy.NewTextResponse(response), metadata), nil
@@ -129,9 +146,15 @@ func NewTodosTool(sessions session.Service) fantasy.AgentTool {
 	)
 }
 
-// buildTodosResponse writes the model-facing tool result. When every item is
-// completed it nudges the model to clear the list so the UI pill disappears.
-func buildTodosResponse(todos []session.Todo, completedCount, inProgressCount int, cleared bool) string {
+// buildTodosResponse writes the model-facing tool result.
+func buildTodosResponse(todos []session.Todo, completedCount, inProgressCount int, cleared, autoCleared bool, justCompleted []string) string {
+	if autoCleared {
+		n := len(justCompleted)
+		if n == 0 {
+			return "All todos completed. Todo list cleared."
+		}
+		return fmt.Sprintf("Completed %d todo(s). All work done; todo list cleared.", n)
+	}
 	if cleared {
 		return "Todo list cleared. All work for this list is done."
 	}
@@ -149,14 +172,11 @@ func buildTodosResponse(todos []session.Todo, completedCount, inProgressCount in
 
 	switch {
 	case len(todos) == 0:
-		// Empty update on an already-empty list.
 		response += "Todo list is empty."
-	case completedCount == len(todos):
-		response += "All todos are completed. Call the todos tool once more with an empty todos array to clear the list so it no longer shows in the UI."
 	case inProgressCount == 0 && pendingCount > 0:
-		response += "No task is in_progress. Mark the next pending task in_progress before continuing, or complete remaining work and clear the list when finished."
+		response += "No task is in_progress. Mark the next pending task in_progress before continuing, or complete remaining work when finished (a fully completed list is cleared automatically)."
 	default:
-		response += "Continue using the todo list to track progress. Mark the current task completed as soon as it is fully done, and clear the list with an empty todos array when the whole job is finished."
+		response += "Continue using the todo list to track progress. Mark the current task completed as soon as it is fully done. When every task is completed the list clears automatically."
 	}
 	return response
 }
