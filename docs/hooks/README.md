@@ -263,6 +263,12 @@ published (default 30s timeout still applies).
 
 - Payload fields: `outcome` (`complete` | `cancelled` | `error`), `error`.
 - Leave `matcher` empty.
+- A queued prompt that is discarded before it ever runs (Escape while
+  prompts are queued) produces no Stop event — nothing started, so
+  nothing stopped.
+- When the turn is already being torn down (Escape, app shutdown) the
+  Stop hook is capped at 2s rather than its configured timeout, so
+  Escape and quit stay responsive.
 
 ## Environment Variables
 
