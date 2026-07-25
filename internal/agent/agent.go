@@ -721,7 +721,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	}
 
 	agent := fantasy.NewAgent(
-		largeModel.Model,
+		wrapRetryableModel(largeModel.Model),
 		fantasy.WithSystemPrompt(systemPrompt),
 		fantasy.WithTools(agentTools...),
 		fantasy.WithUserAgent(userAgent),
@@ -991,7 +991,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			slog.Info("ModelProvider called",
 				"provider", m.ModelCfg.Provider,
 				"model", m.ModelCfg.Model)
-			return m.Model
+			return wrapRetryableModel(m.Model)
 		},
 		OnToolCall: func(tc fantasy.ToolCallContent) error {
 			input, wasSanitized := sanitizeToolInput(tc.ToolName, tc.ToolCallID, tc.Input)
@@ -1401,7 +1401,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	}()
 
 	agent := fantasy.NewAgent(
-		largeModel.Model,
+		wrapRetryableModel(largeModel.Model),
 		fantasy.WithSystemPrompt(string(summaryPrompt)),
 		fantasy.WithUserAgent(userAgent),
 	)
@@ -1844,7 +1844,7 @@ func (a *sessionAgent) SideQuestion(ctx context.Context, sessionID, question str
 		}
 
 		sideAgent := fantasy.NewAgent(
-			chosen.Model,
+			wrapRetryableModel(chosen.Model),
 			fantasy.WithSystemPrompt(string(sideQuestionPrompt)),
 			fantasy.WithMaxOutputTokens(2048),
 			fantasy.WithUserAgent(userAgent),
@@ -1902,7 +1902,7 @@ func (a *sessionAgent) GenerateTitle(ctx context.Context, sessionID string, user
 
 	newAgent := func(m fantasy.LanguageModel, p []byte, tok int64) fantasy.Agent {
 		return fantasy.NewAgent(
-			m,
+			wrapRetryableModel(m),
 			fantasy.WithSystemPrompt(string(p)+"\n /no_think"),
 			fantasy.WithMaxOutputTokens(tok),
 			fantasy.WithUserAgent(userAgent),
