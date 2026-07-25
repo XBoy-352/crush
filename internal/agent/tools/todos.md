@@ -14,9 +14,9 @@ simple single-step or purely conversational requests.
   Do not leave finished work as `in_progress`.
 - Before ending your turn with no further work remaining, every task
   must be `completed` (or removed if no longer relevant).
-- When the whole job is done, clear the list by calling this tool with
-  an empty `todos` array so the UI pill goes away. Leaving an all-
-  completed or partially-completed list behind is wrong.
+- When every task is `completed`, the list is cleared automatically
+  and the UI pill goes away. You may also pass an empty `todos` array
+  to clear early.
 - Never mark a task completed if it is still blocked, partial, or
   failing; keep it `in_progress` and add a follow-up task if needed.
 - Do not print the todo list in your reply text; the UI shows it live.

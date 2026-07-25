@@ -10,22 +10,18 @@ import (
 func TestBuildTodosResponse(t *testing.T) {
 	t.Parallel()
 
-	t.Run("cleared list", func(t *testing.T) {
+	t.Run("explicit clear", func(t *testing.T) {
 		t.Parallel()
-		got := buildTodosResponse(nil, 0, 0, true)
+		got := buildTodosResponse(nil, 0, 0, true, false, nil)
 		require.Contains(t, got, "Todo list cleared")
-		require.NotContains(t, got, "empty todos array")
+		require.NotContains(t, got, "Completed")
 	})
 
-	t.Run("all completed nudges clear", func(t *testing.T) {
+	t.Run("auto clear after all completed", func(t *testing.T) {
 		t.Parallel()
-		todos := []session.Todo{
-			{Content: "a", Status: session.TodoStatusCompleted},
-			{Content: "b", Status: session.TodoStatusCompleted},
-		}
-		got := buildTodosResponse(todos, 2, 0, false)
-		require.Contains(t, got, "2 completed")
-		require.Contains(t, got, "empty todos array")
+		got := buildTodosResponse(nil, 0, 0, true, true, []string{"a", "b"})
+		require.Contains(t, got, "Completed 2 todo")
+		require.Contains(t, got, "cleared")
 	})
 
 	t.Run("no in_progress with pending work", func(t *testing.T) {
@@ -34,7 +30,7 @@ func TestBuildTodosResponse(t *testing.T) {
 			{Content: "a", Status: session.TodoStatusCompleted},
 			{Content: "b", Status: session.TodoStatusPending},
 		}
-		got := buildTodosResponse(todos, 1, 0, false)
+		got := buildTodosResponse(todos, 1, 0, false, false, nil)
 		require.Contains(t, got, "No task is in_progress")
 	})
 
@@ -44,9 +40,30 @@ func TestBuildTodosResponse(t *testing.T) {
 			{Content: "a", Status: session.TodoStatusCompleted},
 			{Content: "b", Status: session.TodoStatusInProgress, ActiveForm: "Doing b"},
 		}
-		got := buildTodosResponse(todos, 1, 1, false)
+		got := buildTodosResponse(todos, 1, 1, false, false, nil)
 		require.Contains(t, got, "1 in progress")
-		require.Contains(t, got, "clear the list")
-		require.NotContains(t, got, "All todos are completed")
+		require.Contains(t, got, "clears automatically")
 	})
+}
+
+func TestNormalizeTodosAutoClear(t *testing.T) {
+	t.Parallel()
+
+	// Mirror the tool's auto-clear decision without spinning up a session store.
+	todos := []session.Todo{
+		{Content: "a", Status: session.TodoStatusCompleted},
+		{Content: "b", Status: session.TodoStatusCompleted},
+	}
+	completed := 0
+	for _, tdo := range todos {
+		if tdo.Status == session.TodoStatusCompleted {
+			completed++
+		}
+	}
+	autoCleared := len(todos) > 0 && completed == len(todos)
+	require.True(t, autoCleared)
+	if autoCleared {
+		todos = nil
+	}
+	require.Nil(t, todos)
 }

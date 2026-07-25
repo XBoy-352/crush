@@ -2391,6 +2391,9 @@ If not, please feel free to ignore. Again do not mention this message to the use
 
 	switch {
 	case completed == len(todos):
+		// Pre-auto-clear sessions (or external writers) can leave an
+		// all-completed list on disk. Nudge one empty update so the
+		// pill disappears.
 		return `Your todo list is fully completed but still visible in the UI. Call the todos tool with an empty todos array to clear it. DO NOT mention this reminder to the user.`
 	case inProgress == 0:
 		return `Your todo list still has unfinished items and none are marked in_progress. Mark the next task in_progress before continuing, or complete remaining work and clear the list with an empty todos array when finished. DO NOT mention this reminder to the user.`
