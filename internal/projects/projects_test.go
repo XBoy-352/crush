@@ -2,6 +2,7 @@ package projects
 
 import (
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -182,5 +183,54 @@ func TestRegisterWithExternalDataDir(t *testing.T) {
 
 	if projects[0].DataDir != "/var/data/crush/myproject" {
 		t.Errorf("Expected data_dir /var/data/crush/myproject, got %s", projects[0].DataDir)
+	}
+}
+
+func TestRegisterOrdersTiedTimestamps(t *testing.T) {
+	// Two registrations that land in the same clock tick must still order
+	// most-recent-first. This is the CI flake seen only on windows-latest,
+	// where time.Now() granularity is coarse enough to tie routinely; pinning
+	// the clock reproduces it on every platform.
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", tmpDir)
+	t.Setenv("CRUSH_GLOBAL_DATA", filepath.Join(tmpDir, "crush"))
+
+	fixed := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	orig := timeNow
+	timeNow = func() time.Time { return fixed }
+	t.Cleanup(func() { timeNow = orig })
+
+	for _, p := range []string{"/p1", "/p2", "/p3"} {
+		if err := Register(p, p+"/.crush"); err != nil {
+			t.Fatalf("Register(%s) failed: %v", p, err)
+		}
+	}
+
+	projects, err := List()
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+	got := make([]string, len(projects))
+	for i, p := range projects {
+		got[i] = p.Path
+	}
+	want := []string{"/p3", "/p2", "/p1"}
+	if !slices.Equal(got, want) {
+		t.Errorf("tied timestamps ordered %v, want %v", got, want)
+	}
+
+	// Re-registering an existing project must move it back to the front.
+	if err := Register("/p1", "/p1/.crush"); err != nil {
+		t.Fatalf("re-Register failed: %v", err)
+	}
+	projects, err = List()
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+	if projects[0].Path != "/p1" {
+		t.Errorf("re-registered project not first: got %s", projects[0].Path)
+	}
+	if len(projects) != 3 {
+		t.Errorf("re-register duplicated an entry: got %d projects", len(projects))
 	}
 }

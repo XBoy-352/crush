@@ -27,6 +27,11 @@ type ProjectList struct {
 
 var mu sync.Mutex
 
+// timeNow is overridable in tests so the equal-timestamp path can be
+// exercised deterministically; time.Now() is too fine-grained on Linux to
+// reproduce it, but coarse enough on Windows to hit it routinely.
+var timeNow = func() time.Time { return time.Now().UTC() }
+
 // projectsFilePath returns the path to the projects.json file.
 func projectsFilePath() string {
 	return filepath.Join(filepath.Dir(config.GlobalConfigData()), projectsFileName)
@@ -81,36 +86,25 @@ func Register(workingDir, dataDir string) error {
 		return err
 	}
 
-	now := time.Now().UTC()
+	now := timeNow()
 
-	// Check if project already exists
-	found := false
-	for i, p := range list.Projects {
-		if p.Path == workingDir {
-			list.Projects[i].DataDir = dataDir
-			list.Projects[i].LastAccessed = now
-			found = true
-			break
-		}
+	// Move the project being registered to the front, so that when its
+	// timestamp ties with an existing entry the just-accessed one still sorts
+	// first. Clock granularity on some platforms (notably Windows) makes two
+	// registrations in quick succession indistinguishable by LastAccessed
+	// alone, and the sort below only preserves this order because it is stable.
+	entry := Project{Path: workingDir, DataDir: dataDir, LastAccessed: now}
+	if i := slices.IndexFunc(list.Projects, func(p Project) bool {
+		return p.Path == workingDir
+	}); i >= 0 {
+		list.Projects = slices.Delete(list.Projects, i, i+1)
 	}
+	list.Projects = slices.Insert(list.Projects, 0, entry)
 
-	if !found {
-		list.Projects = append(list.Projects, Project{
-			Path:         workingDir,
-			DataDir:      dataDir,
-			LastAccessed: now,
-		})
-	}
-
-	// Sort by last accessed (most recent first)
-	slices.SortFunc(list.Projects, func(a, b Project) int {
-		if a.LastAccessed.After(b.LastAccessed) {
-			return -1
-		}
-		if a.LastAccessed.Before(b.LastAccessed) {
-			return 1
-		}
-		return 0
+	// Sort by last accessed (most recent first). Must be stable: equal
+	// timestamps otherwise order arbitrarily.
+	slices.SortStableFunc(list.Projects, func(a, b Project) int {
+		return b.LastAccessed.Compare(a.LastAccessed)
 	})
 
 	return Save(list)
