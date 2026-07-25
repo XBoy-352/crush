@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -213,30 +215,38 @@ func newSandboxedState() *lua.LState {
 	return L
 }
 
-// stripLineOffset adjusts error line numbers for the wrapper line.
+var (
+	// Runtime errors: `<string>:4: message`.
+	reRuntimeLine = regexp.MustCompile(`<string>:(\d+):`)
+	// Syntax errors from LoadString: `<string> line:4(column:11) near ...`.
+	reSyntaxLine = regexp.MustCompile(`<string> line:(\d+)\(`)
+)
+
+// stripLineOffset adjusts error line numbers for the wrapper line Run prepends
+// to the script, so reported lines match the script the caller wrote. Only the
+// two shapes gopher-lua actually emits are rewritten; any other message is
+// returned untouched rather than spliced blindly on its colons.
 func stripLineOffset(err error) error {
 	if err == nil {
 		return nil
 	}
 	msg := err.Error()
-	idx := strings.Index(msg, ":")
-	if idx == -1 {
-		return err
+	for _, re := range []*regexp.Regexp{reRuntimeLine, reSyntaxLine} {
+		loc := re.FindStringSubmatchIndex(msg)
+		if loc == nil {
+			continue
+		}
+		lineNum, convErr := strconv.Atoi(msg[loc[2]:loc[3]])
+		if convErr != nil {
+			continue
+		}
+		adjusted := lineNum - 1
+		if adjusted < 1 {
+			adjusted = 1
+		}
+		return errors.New(msg[:loc[2]] + strconv.Itoa(adjusted) + msg[loc[3]:])
 	}
-	rest := msg[idx+1:]
-	end := strings.IndexAny(rest, ":")
-	if end == -1 {
-		return err
-	}
-	var lineNum int
-	if _, parseErr := fmt.Sscanf(rest[:end], "%d", &lineNum); parseErr != nil {
-		return err
-	}
-	adjusted := lineNum - 1
-	if adjusted < 1 {
-		adjusted = 1
-	}
-	return errors.New(msg[:idx+1] + fmt.Sprintf("%d", adjusted) + rest[end:])
+	return err
 }
 
 func registerAgent(L *lua.LState, st *runState) {
@@ -483,16 +493,23 @@ func luaToGo(v lua.LValue, seen map[*lua.LTable]bool, depth int) (any, error) {
 	}
 }
 
-// isArrayTable returns true if the table is a sequence (1..n).
-// Empty tables are treated as arrays so they serialize as [].
+// isArrayTable returns true if the table is a true sequence: every key a
+// positive integer with no holes. Sparse or non-integer numeric keys ({[0]=x},
+// {[5]=x}, {[1.5]=x}) serialize as objects instead, since the array branch
+// walks 1..Len() and would drop those values or pad the gaps with nulls.
+// Empty tables are sequences, so they serialize as [].
 func isArrayTable(t *lua.LTable) bool {
-	isArray := true
+	n := 0
+	isSeq := true
 	t.ForEach(func(k, _ lua.LValue) {
-		if _, ok := k.(lua.LNumber); !ok {
-			isArray = false
+		num, ok := k.(lua.LNumber)
+		if !ok || float64(num) != math.Trunc(float64(num)) || num < 1 {
+			isSeq = false
 		}
+		n++
 	})
-	return isArray
+	// n == t.Len() rejects holes; both are 0 for an empty table.
+	return isSeq && n == t.Len()
 }
 
 func jsonToLua(L *lua.LState, s string) (lua.LValue, error) {

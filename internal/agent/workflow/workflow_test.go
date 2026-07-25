@@ -393,3 +393,63 @@ func TestWorkflowRun_ParallelJSONExtractionError(t *testing.T) {
 	require.Equal(t, false, arr[0]["ok"])
 	require.Contains(t, arr[0]["error"].(string), "no JSON")
 }
+
+func TestWorkflowRun_NumericKeyTables(t *testing.T) {
+	t.Parallel()
+	// Only a true 1..n sequence may serialize as an array. Sparse or
+	// non-positive-integer numeric keys must become objects: the array branch
+	// walks 1..Len() and would otherwise drop values or invent nulls.
+	cases := []struct{ script, want string }{
+		{`return {1, 2, 3}`, `[1,2,3]`},
+		{`return {}`, `[]`},
+		{`return {[0]="z"}`, `{"0":"z"}`},
+		{`return {[-1]="n"}`, `{"-1":"n"}`},
+		{`return {[1.5]="f"}`, `{"1.5":"f"}`},
+		{`return {[5]="x"}`, `{"5":"x"}`},
+		{`return {[1]="a",[3]="c"}`, `{"1":"a","3":"c"}`},
+		{`return {1, 2, [10]=99}`, `{"1":1,"2":2,"10":99}`},
+		{`return {[1]="a",[2]="b",name="x"}`, `{"1":"a","2":"b","name":"x"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.script, func(t *testing.T) {
+			t.Parallel()
+			res, err := Run(context.Background(), tc.script, nil, Options{})
+			require.NoError(t, err)
+			require.JSONEq(t, tc.want, res.Value)
+		})
+	}
+}
+
+func TestWorkflowRun_ErrorLineNumbers(t *testing.T) {
+	t.Parallel()
+	// Reported lines must match the script the caller wrote, and the rest of
+	// the message must survive intact -- the model reads it to self-correct.
+	cases := []struct{ name, script, want string }{
+		{"syntax first line", `local x = = 1`, `<string> line:1(column:11) near '=':`},
+		{"syntax later line", "\n\nlocal y = = 2", `<string> line:3(column:11) near '=':`},
+		{"runtime first line", `error('boom')`, `<string>:1: boom`},
+		{"runtime later line", "\n\nerror('deep')", `<string>:3: deep`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Run(context.Background(), tc.script, nil, Options{})
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
+func TestStripLineOffset_LeavesUnknownShapesAlone(t *testing.T) {
+	t.Parallel()
+	// Anything that is not a gopher-lua line-bearing message must pass through
+	// byte-for-byte rather than being spliced on whatever colons it contains.
+	for _, msg := range []string{
+		"context deadline exceeded",
+		"http://example.com:8080: dial failed",
+		"script too large: 65536 bytes",
+	} {
+		require.Equal(t, msg, stripLineOffset(errors.New(msg)).Error())
+	}
+	require.NoError(t, stripLineOffset(nil))
+}
