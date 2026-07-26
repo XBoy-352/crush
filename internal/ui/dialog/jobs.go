@@ -128,6 +128,9 @@ func (j *Jobs) HandleMsg(msg tea.Msg) Action {
 			case key.Matches(msg, j.keyMap.Close):
 				return ActionClose{}
 			case key.Matches(msg, j.keyMap.Kill):
+				if j.selectedJob() == nil {
+					return ActionCmd{Cmd: util.ReportWarn("No job selected")}
+				}
 				j.mode = jobsModeKilling
 				j.refresh()
 			case key.Matches(msg, j.keyMap.Previous):

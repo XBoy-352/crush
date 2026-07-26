@@ -99,3 +99,26 @@ func TestJobs_CancelKillDoesNotKill(t *testing.T) {
 	require.Nil(t, action, "cancelling must not produce a kill action")
 	require.Equal(t, jobsModeNormal, j.mode)
 }
+
+// TestJobs_KillKeysNeedASelection pins that neither kill key arms the
+// "Kill this job?" confirmation when there is nothing to kill. An empty job
+// list used to answer ctrl+x with a confirmation prompt for no job at all.
+func TestJobs_KillKeysNeedASelection(t *testing.T) {
+	for name, msg := range map[string]tea.KeyPressMsg{
+		"ctrl+x": {Code: 'x', Mod: tea.ModCtrl},
+		"enter":  {Code: tea.KeyEnter},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// A fresh dialog per case: sharing one would let the first
+			// subtest's mode leak into the second and fail it for the
+			// wrong reason.
+			j := newTestJobs(t)
+			require.Zero(t, j.list.Len(), "no jobs must be registered for this case")
+
+			action := j.HandleMsg(msg)
+			require.IsType(t, ActionCmd{}, action, "%s must report instead of arming a kill", name)
+			require.Equal(t, jobsModeNormal, j.mode,
+				"%s must not show a kill confirmation with nothing selected", name)
+		})
+	}
+}
