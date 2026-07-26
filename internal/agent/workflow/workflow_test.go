@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -715,4 +716,109 @@ func TestWorkflowRun_CancelParentContext(t *testing.T) {
 	_, err := Run(ctx, script, spawn, Options{MaxConcurrent: 1})
 	require.Less(t, time.Since(start), 5*time.Second, "must return promptly after cancel")
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+// TestWorkflowRun_LogsSurviveFailure guards the failure path returning a
+// partial Result. Run used to return a zero Result on every error, so
+// workflow_tool.go always rendered "Logs:\n(none)" and dropped the logs
+// metadata -- discarding exactly the log() output needed to diagnose the
+// failure.
+func TestWorkflowRun_LogsSurviveFailure(t *testing.T) {
+	t.Parallel()
+
+	spawn := func(_ context.Context, _ int, _, prompt string, _ SpawnOpts) (string, error) {
+		return prompt, nil
+	}
+
+	t.Run("runtime error", func(t *testing.T) {
+		t.Parallel()
+		res, err := Run(context.Background(), `
+			log("step 1 done")
+			agent("a")
+			log("step 2 done")
+			error("boom")
+		`, spawn, Options{})
+		require.Error(t, err)
+		require.Equal(t, []string{"step 1 done", "step 2 done"}, res.Logs,
+			"logs emitted before the error must survive the failure")
+		require.Equal(t, 1, res.AgentCount, "agent count must survive the failure")
+	})
+
+	t.Run("spawn error", func(t *testing.T) {
+		t.Parallel()
+		res, err := Run(context.Background(), `
+			log("before spawn")
+			agent("a")
+		`, func(context.Context, int, string, string, SpawnOpts) (string, error) {
+			return "", errors.New("spawn exploded")
+		}, Options{})
+		require.Error(t, err)
+		require.Equal(t, []string{"before spawn"}, res.Logs)
+		require.Equal(t, 1, res.AgentCount)
+	})
+
+	t.Run("unserializable return value", func(t *testing.T) {
+		t.Parallel()
+		res, err := Run(context.Background(), `
+			log("computed")
+			local t = {}
+			t.self = t
+			return t
+		`, spawn, Options{})
+		require.Error(t, err)
+		require.Equal(t, []string{"computed"}, res.Logs)
+	})
+}
+
+// TestWorkflowRun_LogTruncationKeepsValidUTF8 guards addLog's rune-boundary
+// truncation. A raw msg[:maxLogEntryBytes] can split a multi-byte rune, and
+// json.Marshal then rewrites the partial sequence to U+FFFD in the tool
+// metadata the model reads.
+func TestWorkflowRun_LogTruncationKeepsValidUTF8(t *testing.T) {
+	t.Parallel()
+
+	// 3-byte runes: 2048 is not a multiple of 3, so a byte-offset cut splits one.
+	// The literal is a real U+20AC in the source; gopher-lua is 5.1 and has no
+	// \u{...} escape, so an escape here would silently degrade to ASCII and the
+	// test would pass without exercising the truncation at all.
+	res, err := Run(context.Background(), `log(string.rep("€", 1000))`,
+		func(context.Context, int, string, string, SpawnOpts) (string, error) { return "", nil },
+		Options{})
+	require.NoError(t, err)
+	require.Len(t, res.Logs, 1)
+
+	entry := res.Logs[0]
+	require.LessOrEqual(t, len(entry), maxLogEntryBytes, "entry must still be capped")
+	require.Greater(t, len(entry), maxLogEntryBytes-4, "entry must not lose more than one rune")
+	require.True(t, utf8.ValidString(entry), "truncation must not split a rune")
+
+	b, err := json.Marshal(entry)
+	require.NoError(t, err)
+	require.NotContains(t, string(b), `�`, "no replacement chars must reach the tool metadata")
+}
+
+func TestTruncateUTF8(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		in    string
+		limit int
+		want  string
+	}{
+		{"under the limit", "abc", 10, "abc"},
+		{"exactly the limit", "abc", 3, "abc"},
+		{"ascii cut", "abcdef", 3, "abc"},
+		{"cut on a rune boundary", "€€", 3, "€"},
+		{"cut mid rune backs off", "€€", 4, "€"},
+		{"cut mid rune backs off further", "€€", 5, "€"},
+		{"limit zero", "€", 0, ""},
+		{"whole string is one oversized rune", "\U0001F600", 2, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := truncateUTF8(tc.in, tc.limit)
+			require.Equal(t, tc.want, got)
+			require.True(t, utf8.ValidString(got))
+		})
+	}
 }

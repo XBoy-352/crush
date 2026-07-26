@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	lua "github.com/yuin/gopher-lua"
 )
@@ -150,16 +151,40 @@ func (st *runState) addLog(msg string) {
 		st.mu.Unlock()
 		return
 	}
-	if len(msg) > maxLogEntryBytes {
-		msg = msg[:maxLogEntryBytes]
-	}
+	msg = truncateUTF8(msg, maxLogEntryBytes)
 	st.logs = append(st.logs, msg)
 	st.mu.Unlock()
 	st.progress("log", -1, "", msg)
 }
 
+// truncateUTF8 caps s at limit bytes without splitting a rune. Slicing a
+// UTF-8 string at an arbitrary byte offset can leave a partial sequence, which
+// json.Marshal then rewrites to U+FFFD, so back off to the last rune boundary
+// at or before the limit.
+func truncateUTF8(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	for limit > 0 && !utf8.RuneStart(s[limit]) {
+		limit--
+	}
+	return s[:limit]
+}
+
+// snapshot returns the logs and agent count accumulated so far. Callers use it
+// on failure paths so a workflow that dies mid-run still reports the log()
+// output produced before the error -- which is exactly what the model needs to
+// diagnose the failure.
+func (st *runState) snapshot() Result {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return Result{Logs: st.logs, AgentCount: st.agentIndex}
+}
+
 // Run compiles and executes a Lua script. It returns ctx.Err() if
-// canceled. Script errors come back as ordinary errors.
+// canceled. Script errors come back as ordinary errors. On failure the
+// returned Result still carries the logs and agent count accumulated
+// before the error.
 func Run(ctx context.Context, script string, spawn SpawnFunc, opts Options) (Result, error) {
 	if len(script) > MaxScriptBytes {
 		return Result{}, fmt.Errorf("script exceeds maximum length of %d bytes", MaxScriptBytes)
@@ -197,11 +222,11 @@ func Run(ctx context.Context, script string, spawn SpawnFunc, opts Options) (Res
 	wrapped := "return function() -- line 1\n" + script + "\nend"
 	fn, err := L.LoadString(wrapped)
 	if err != nil {
-		return Result{}, fmt.Errorf("script error: %w", stripLineOffset(err))
+		return st.snapshot(), fmt.Errorf("script error: %w", stripLineOffset(err))
 	}
 	L.Push(fn)
 	if err := L.PCall(0, 1, nil); err != nil {
-		return Result{}, fmt.Errorf("script error: %w", stripLineOffset(err))
+		return st.snapshot(), fmt.Errorf("script error: %w", stripLineOffset(err))
 	}
 
 	if err := L.CallByParam(lua.P{
@@ -210,9 +235,9 @@ func Run(ctx context.Context, script string, spawn SpawnFunc, opts Options) (Res
 		Protect: true,
 	}, lua.LNil); err != nil {
 		if runCtx.Err() != nil {
-			return Result{}, runCtx.Err()
+			return st.snapshot(), runCtx.Err()
 		}
-		return Result{}, fmt.Errorf("workflow script failed: %w", stripLineOffset(err))
+		return st.snapshot(), fmt.Errorf("workflow script failed: %w", stripLineOffset(err))
 	}
 
 	ret := L.Get(-1)
@@ -222,11 +247,11 @@ func Run(ctx context.Context, script string, spawn SpawnFunc, opts Options) (Res
 	if ret != lua.LNil {
 		tree, err := luaToGo(ret, make(map[*lua.LTable]bool), 0)
 		if err != nil {
-			return Result{}, fmt.Errorf("failed to serialize return value: %w", err)
+			return st.snapshot(), fmt.Errorf("failed to serialize return value: %w", err)
 		}
 		b, err := json.Marshal(tree)
 		if err != nil {
-			return Result{}, fmt.Errorf("could not marshal return value: %w", err)
+			return st.snapshot(), fmt.Errorf("could not marshal return value: %w", err)
 		}
 		val = string(b)
 	}
