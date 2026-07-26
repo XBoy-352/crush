@@ -126,6 +126,10 @@ type Finish struct {
 	Time    int64        `json:"time"`
 	Message string       `json:"message,omitempty"`
 	Details string       `json:"details,omitempty"`
+	// Optional per-step usage. Zero values mean unknown (legacy messages).
+	PromptTokens     int64   `json:"prompt_tokens,omitempty"`
+	CompletionTokens int64   `json:"completion_tokens,omitempty"`
+	Cost             float64 `json:"cost,omitempty"`
 }
 
 func (Finish) isPart() {}
@@ -471,6 +475,12 @@ func (m *Message) ResetStreamedContent() {
 }
 
 func (m *Message) AddFinish(reason FinishReason, message, details string) {
+	m.AddFinishWithUsage(reason, message, details, 0, 0, 0)
+}
+
+// AddFinishWithUsage records the turn finish along with optional token/cost
+// usage for later per-model aggregation.
+func (m *Message) AddFinishWithUsage(reason FinishReason, message, details string, promptTokens, completionTokens int64, cost float64) {
 	// remove any existing finish part
 	for i, part := range m.Parts {
 		if _, ok := part.(Finish); ok {
@@ -478,7 +488,15 @@ func (m *Message) AddFinish(reason FinishReason, message, details string) {
 			break
 		}
 	}
-	m.Parts = append(m.Parts, Finish{Reason: reason, Time: time.Now().Unix(), Message: message, Details: details})
+	m.Parts = append(m.Parts, Finish{
+		Reason:           reason,
+		Time:             time.Now().Unix(),
+		Message:          message,
+		Details:          details,
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		Cost:             cost,
+	})
 }
 
 func (m *Message) AddImageURL(url, detail string) {

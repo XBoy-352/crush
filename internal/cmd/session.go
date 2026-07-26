@@ -38,11 +38,12 @@ var sessionCmd = &cobra.Command{
 }
 
 var (
-	sessionListJSON   bool
-	sessionShowJSON   bool
-	sessionLastJSON   bool
-	sessionDeleteJSON bool
-	sessionRenameJSON bool
+	sessionListJSON    bool
+	sessionShowJSON    bool
+	sessionShowByModel bool
+	sessionLastJSON    bool
+	sessionDeleteJSON  bool
+	sessionRenameJSON  bool
 )
 
 var sessionListCmd = &cobra.Command{
@@ -88,6 +89,7 @@ var sessionRenameCmd = &cobra.Command{
 func init() {
 	sessionListCmd.Flags().BoolVar(&sessionListJSON, "json", false, "output in JSON format")
 	sessionShowCmd.Flags().BoolVar(&sessionShowJSON, "json", false, "output in JSON format")
+	sessionShowCmd.Flags().BoolVar(&sessionShowByModel, "by-model", false, "show token usage and cost broken down by model")
 	sessionLastCmd.Flags().BoolVar(&sessionLastJSON, "json", false, "output in JSON format")
 	sessionDeleteCmd.Flags().BoolVar(&sessionDeleteJSON, "json", false, "output in JSON format")
 	sessionRenameCmd.Flags().BoolVar(&sessionRenameJSON, "json", false, "output in JSON format")
@@ -279,6 +281,12 @@ func runSessionShow(cmd *cobra.Command, args []string) error {
 	}
 
 	msgPtrs := messagePtrs(msgs)
+	if sessionShowByModel {
+		if sessionShowJSON {
+			return outputSessionByModelJSON(cmd.OutOrStdout(), sess, msgPtrs)
+		}
+		return outputSessionByModelHuman(cmd.OutOrStdout(), sess, msgPtrs)
+	}
 	if sessionShowJSON {
 		return outputSessionJSON(cmd.OutOrStdout(), sess, msgPtrs)
 	}
@@ -403,6 +411,87 @@ func messagePtrs(msgs []message.Message) []*message.Message {
 		ptrs[i] = &msgs[i]
 	}
 	return ptrs
+}
+
+// aggregateSessionCostByModel groups assistant-message Finish usage by
+// model/provider. Messages without Finish usage still count toward
+// MessageCount so older sessions remain useful.
+func aggregateSessionCostByModel(msgs []*message.Message) []sessionModelCost {
+	type key struct{ model, provider string }
+	order := make([]key, 0)
+	by := make(map[key]*sessionModelCost)
+	for _, msg := range msgs {
+		if msg == nil || msg.Role != message.Assistant {
+			continue
+		}
+		k := key{model: msg.Model, provider: msg.Provider}
+		if k.model == "" {
+			k.model = "unknown"
+		}
+		if k.provider == "" {
+			k.provider = "unknown"
+		}
+		agg, ok := by[k]
+		if !ok {
+			agg = &sessionModelCost{Model: k.model, Provider: k.provider}
+			by[k] = agg
+			order = append(order, k)
+		}
+		agg.MessageCount++
+		if fin := msg.FinishPart(); fin != nil {
+			agg.PromptTokens += fin.PromptTokens
+			agg.CompletionTokens += fin.CompletionTokens
+			agg.Cost += fin.Cost
+		}
+	}
+	out := make([]sessionModelCost, 0, len(order))
+	for _, k := range order {
+		agg := by[k]
+		agg.TotalTokens = agg.PromptTokens + agg.CompletionTokens
+		out = append(out, *agg)
+	}
+	return out
+}
+
+func outputSessionByModelJSON(w io.Writer, sess session.Session, msgs []*message.Message) error {
+	skills := extractSkillsFromMessages(msgs)
+	output := sessionShowOutput{
+		Meta: sessionShowMeta{
+			ID:               session.HashID(sess.ID),
+			UUID:             sess.ID,
+			Title:            sess.Title,
+			Created:          time.Unix(sess.CreatedAt, 0).Format(time.RFC3339),
+			Modified:         time.Unix(sess.UpdatedAt, 0).Format(time.RFC3339),
+			Cost:             sess.Cost,
+			PromptTokens:     sess.PromptTokens,
+			CompletionTokens: sess.CompletionTokens,
+			TotalTokens:      sess.PromptTokens + sess.CompletionTokens,
+			Skills:           skills,
+			ByModel:          aggregateSessionCostByModel(msgs),
+		},
+	}
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	return enc.Encode(output)
+}
+
+func outputSessionByModelHuman(w io.Writer, sess session.Session, msgs []*message.Message) error {
+	byModel := aggregateSessionCostByModel(msgs)
+	fmt.Fprintf(w, "Session: %s\n", sess.Title)
+	fmt.Fprintf(w, "Total cost: $%.6f  tokens: %d in / %d out\n\n",
+		sess.Cost, sess.PromptTokens, sess.CompletionTokens)
+	if len(byModel) == 0 {
+		fmt.Fprintln(w, "No assistant messages with model metadata.")
+		return nil
+	}
+	fmt.Fprintf(w, "%-24s %-16s %8s %12s %12s %12s\n",
+		"MODEL", "PROVIDER", "MSGS", "PROMPT", "COMPLETION", "COST")
+	for _, row := range byModel {
+		fmt.Fprintf(w, "%-24s %-16s %8d %12d %12d $%11.6f\n",
+			row.Model, row.Provider, row.MessageCount,
+			row.PromptTokens, row.CompletionTokens, row.Cost)
+	}
+	return nil
 }
 
 func outputSessionJSON(w io.Writer, sess session.Session, msgs []*message.Message) error {
@@ -579,6 +668,18 @@ type sessionShowMeta struct {
 	CompletionTokens int64              `json:"completion_tokens"`
 	TotalTokens      int64              `json:"total_tokens"`
 	Skills           []sessionShowSkill `json:"skills,omitempty"`
+	ByModel          []sessionModelCost `json:"by_model,omitempty"`
+}
+
+// sessionModelCost is the per-model usage breakdown for a single session.
+type sessionModelCost struct {
+	Model            string  `json:"model"`
+	Provider         string  `json:"provider"`
+	MessageCount     int64   `json:"message_count"`
+	PromptTokens     int64   `json:"prompt_tokens"`
+	CompletionTokens int64   `json:"completion_tokens"`
+	TotalTokens      int64   `json:"total_tokens"`
+	Cost             float64 `json:"cost"`
 }
 
 type sessionShowSkill struct {

@@ -1037,7 +1037,6 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 					}
 				}
 			}
-			currentAssistant.AddFinish(finishReason, "", "")
 			sessionLock.Lock()
 			defer sessionLock.Unlock()
 
@@ -1046,7 +1045,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				return getSessionErr
 			}
 			usage, estimated := fallbackStepUsage(stepMessages, stepResult)
-			a.updateSessionUsage(largeModel, &updatedSession, usage, a.openrouterCost(stepResult.ProviderMetadata), estimated)
+			overrideCost := a.openrouterCost(stepResult.ProviderMetadata)
+			stepCost := stepUsageCost(largeModel, usage, overrideCost, estimated)
+			promptTok, completionTok := stepUsageTokens(usage)
+			currentAssistant.AddFinishWithUsage(finishReason, "", "", promptTok, completionTok, stepCost)
+			a.updateSessionUsage(largeModel, &updatedSession, usage, overrideCost, estimated)
 			extractHyperCredits(stepResult.ProviderMetadata)
 			_, sessionErr := a.sessions.Save(ctx, updatedSession)
 			if sessionErr != nil {
@@ -2030,33 +2033,38 @@ func extractHyperCredits(metadata fantasy.ProviderMetadata) {
 	}
 }
 
+func stepUsageTokens(usage fantasy.Usage) (promptTokens, completionTokens int64) {
+	return usage.InputTokens + usage.CacheCreationTokens + usage.CacheReadTokens, usage.OutputTokens
+}
+
+func stepUsageCost(model Model, usage fantasy.Usage, overrideCost *float64, estimated bool) float64 {
+	if estimated {
+		return 0
+	}
+	if overrideCost != nil {
+		if model.FlatRate {
+			return 0
+		}
+		return *overrideCost
+	}
+	if model.FlatRate {
+		return 0
+	}
+	modelConfig := model.CatwalkCfg
+	return modelConfig.CostPer1MInCached/1e6*float64(usage.CacheCreationTokens) +
+		modelConfig.CostPer1MOutCached/1e6*float64(usage.CacheReadTokens) +
+		modelConfig.CostPer1MIn/1e6*float64(usage.InputTokens) +
+		modelConfig.CostPer1MOut/1e6*float64(usage.OutputTokens)
+}
+
 func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session, usage fantasy.Usage, overrideCost *float64, estimated bool) {
 	if !usageIsZero(usage) {
 		session.EstimatedUsage = estimated
 	}
 
-	modelConfig := model.CatwalkCfg
-	cost := modelConfig.CostPer1MInCached/1e6*float64(usage.CacheCreationTokens) +
-		modelConfig.CostPer1MOutCached/1e6*float64(usage.CacheReadTokens) +
-		modelConfig.CostPer1MIn/1e6*float64(usage.InputTokens) +
-		modelConfig.CostPer1MOut/1e6*float64(usage.OutputTokens)
-
+	cost := stepUsageCost(model, usage, overrideCost, estimated)
 	if !estimated {
 		a.eventTokensUsed(session.ID, model, usage, cost)
-	}
-
-	if estimated {
-		cost = 0
-	} else {
-		// Use override cost if available (e.g., from OpenRouter).
-		if overrideCost != nil {
-			cost = *overrideCost
-		}
-
-		// Skip cost accumulation
-		if model.FlatRate {
-			cost = 0
-		}
 	}
 
 	session.Cost += cost
