@@ -733,6 +733,8 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.session = msg.session
 		m.sidebarOffset = 0
 		m.sessionFiles = msg.files
+		// A retry countdown belongs to the previous session; drop it.
+		m.clearRetryCountdown()
 		// Session switch: the memoized busy state and queued prompts
 		// belong to the previous session. Drop them and re-fetch
 		// off-thread so the queue pill and esc behavior track the new
@@ -4655,6 +4657,11 @@ type retryTickMsg struct {
 // handleAgentNotification translates domain agent events into desktop
 // notifications using the UI notification backend.
 func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
+	// Ignore notifications for other sessions. Notifications with an
+	// empty SessionID (e.g. TypeReAuthenticate) are always delivered.
+	if n.SessionID != "" && (m.session == nil || n.SessionID != m.session.ID) {
+		return nil
+	}
 	var cmds []tea.Cmd
 	switch n.Type {
 	case notify.TypeRetry:

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/crush/internal/agent/notify"
+	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/util"
 	"github.com/stretchr/testify/require"
@@ -61,5 +62,59 @@ func TestRetryCountdownTicksAreSequenced(t *testing.T) {
 	stale := m.retrySeq
 	m.clearRetryCountdown()
 	require.Nil(t, m.handleRetryTick(retryTickMsg{seq: stale}))
+	require.Empty(t, m.status.msg.Msg)
+}
+
+// TestRetryCountdownIsSessionScoped ensures a retry notification for
+// session A does not render a countdown when the user is viewing
+// session B.
+func TestRetryCountdownIsSessionScoped(t *testing.T) {
+	t.Parallel()
+
+	m := newRetryTestUI(t)
+	m.session = &session.Session{ID: "s1"}
+
+	cmd := m.handleAgentNotification(notify.Notification{
+		SessionID:  "s1",
+		Type:       notify.TypeRetry,
+		Message:    "rate limit",
+		RetryDelay: 10 * time.Second,
+		Attempt:    1,
+		MaxRetries: 6,
+	})
+	require.NotNil(t, cmd, "beginRetryCountdown must return a tick command")
+	require.Contains(t, m.status.msg.Msg, "Retrying in")
+	require.Contains(t, m.status.msg.Msg, "rate limit")
+
+	cmd = m.handleAgentNotification(notify.Notification{
+		SessionID:  "s2",
+		Type:       notify.TypeRetry,
+		Message:    "timeout",
+		RetryDelay: 15 * time.Second,
+		Attempt:    2,
+		MaxRetries: 6,
+	})
+	require.Nil(t, cmd, "must ignore retry notification for a different session")
+	require.Contains(t, m.status.msg.Msg, "Retrying in")
+	require.Contains(t, m.status.msg.Msg, "rate limit")
+	require.NotContains(t, m.status.msg.Msg, "timeout")
+
+	m.clearRetryCountdown()
+}
+
+func TestRetryNotificationWithNoSessionIsIgnored(t *testing.T) {
+	t.Parallel()
+
+	m := newRetryTestUI(t)
+	require.Nil(t, m.session)
+
+	cmd := m.handleAgentNotification(notify.Notification{
+		SessionID:  "s1",
+		Type:       notify.TypeRetry,
+		RetryDelay: 5 * time.Second,
+		Attempt:    1,
+		MaxRetries: 6,
+	})
+	require.Nil(t, cmd)
 	require.Empty(t, m.status.msg.Msg)
 }
