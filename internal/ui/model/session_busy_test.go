@@ -629,3 +629,59 @@ func TestBusyRefreshProbesForegroundWaits(t *testing.T) {
 	require.Equal(t, 1, ws.fgWaitCalls, "busy refresh must probe exactly once")
 	require.True(t, m.hasForegroundWaitsCached())
 }
+
+// ctrlB is the Ctrl+B keystroke as the Bubble Tea runtime delivers it.
+func ctrlB() tea.KeyPressMsg {
+	return tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl}
+}
+
+// TestCtrlBDoesNotProbeWorkspaceSynchronously pins that the Ctrl+B intercept
+// decides from the memoized value alone.
+//
+// Ctrl+B is bound to character-backward in the textarea, so this handler runs
+// on an ordinary text-editing keystroke while the user types a queued
+// message. Probing the workspace here is a blocking, timeout-less HTTP
+// round-trip in client/server mode
+// (ClientWorkspace.AgentHasForegroundWaits -> GetAgentSessionInfo with
+// context.Background()) on the Update goroutine: a slow or wedged server
+// freezes the TUI mid-word. Update must stay free of synchronous workspace
+// calls — see the invariant at the top of workspace_cache.go.
+func TestCtrlBDoesNotProbeWorkspaceSynchronously(t *testing.T) {
+	pinTTLs(t)
+
+	// Busy, a wait really does exist server-side, but the memoized value
+	// says otherwise and is stale: the tempting moment to "just probe".
+	ws := &countingWorkspace{ready: true, agentBusy: true, hasForegroundWaits: true}
+	m := newBusyUI(ws)
+	warmCaches(m, true)
+	m.fgWaitCache.invalidate()
+	ws.resetCounters()
+
+	m.Update(ctrlB())
+
+	require.Zero(t, ws.syncProbes(),
+		"Ctrl+B must not probe the workspace synchronously from Update (blocking HTTP on a text-editing keystroke)")
+	require.Zero(t, ws.bgToolsCalls,
+		"with no known foreground wait, Ctrl+B must fall through to the textarea")
+}
+
+// TestCtrlBBackgroundsWhenWaitIsKnown is the other half: once the memoized
+// probe reports a foreground wait, Ctrl+B must actually release it — and do
+// so from a command, off the Update goroutine.
+func TestCtrlBBackgroundsWhenWaitIsKnown(t *testing.T) {
+	pinTTLs(t)
+
+	ws := &countingWorkspace{ready: true, agentBusy: true, hasForegroundWaits: true}
+	m := newBusyUI(ws)
+	warmCaches(m, true)
+	m.fgWaitCache.set(true)
+	ws.resetCounters()
+
+	_, cmd := m.Update(ctrlB())
+	require.Zero(t, ws.bgToolsCalls,
+		"the release must happen in a tea.Cmd, not inline in Update")
+
+	runCmds(m, cmd)
+	require.Equal(t, 1, ws.bgToolsCalls,
+		"Ctrl+B must release the foreground waits once a wait is known")
+}

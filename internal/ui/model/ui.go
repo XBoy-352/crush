@@ -2511,23 +2511,26 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 
 	// Move blocking bash tools to background without canceling the turn.
 	// Only intercept when something is actually waiting; otherwise leave
-	// ctrl+b for the textarea (character-backward) while the user typing.
-	// When the fgWait cache is stale (the ~500ms window after bash starts)
-	// probe directly so we neither miss a real wait nor steal ctrl+b when
-	// nothing is backgroundable.
+	// ctrl+b for the textarea (character-backward) while the user types.
+	//
+	// The decision reads the memoized value only. Probing the workspace
+	// here would be a blocking, timeout-less HTTP round-trip in
+	// client/server mode (ClientWorkspace.AgentHasForegroundWaits ->
+	// GetAgentSessionInfo with context.Background()), on the Update
+	// goroutine, triggered by an ordinary text-editing keystroke — a
+	// slow or wedged server would freeze the whole TUI mid-word. See the
+	// invariant at the top of workspace_cache.go.
+	//
+	// The cost is a bounded window: a bash tool that starts blocking just
+	// after the last probe is not backgroundable until the busy backstop
+	// refreshes (<= busyCacheTTL), so the first Ctrl+B may only move the
+	// cursor and the next one works.
 	if key.Matches(msg, m.keyMap.Chat.Background) {
-		if m.isAgentBusy() {
-			hasWaits := m.hasForegroundWaitsCached()
-			if !hasWaits && !m.fgWaitCache.fresh(busyCacheTTL) && m.hasSession() && m.com != nil && m.com.Workspace != nil {
-				hasWaits = m.com.Workspace.AgentHasForegroundWaits(m.session.ID)
-				m.fgWaitCache.set(hasWaits)
+		if m.isAgentBusy() && m.hasForegroundWaitsCached() {
+			if cmd := m.backgroundForegroundTools(); cmd != nil {
+				cmds = append(cmds, cmd)
 			}
-			if hasWaits {
-				if cmd := m.backgroundForegroundTools(); cmd != nil {
-					cmds = append(cmds, cmd)
-				}
-				return tea.Batch(cmds...)
-			}
+			return tea.Batch(cmds...)
 		}
 	}
 
