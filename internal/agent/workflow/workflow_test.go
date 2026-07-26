@@ -571,3 +571,148 @@ func TestStripLineOffset_LeavesUnknownShapesAlone(t *testing.T) {
 	}
 	require.NoError(t, stripLineOffset(nil))
 }
+
+func TestWorkflowRun_ProgressEvents(t *testing.T) {
+	t.Parallel()
+	script := `
+		log("starting")
+		local r1 = agent("a")
+		log("mid")
+		local r2 = agent("b")
+		local r3 = agent("c")
+		return r1 .. r2 .. r3
+	`
+	var mu sync.Mutex
+	var events []Progress
+	spawn := func(_ context.Context, _ int, _, prompt string, _ SpawnOpts) (string, error) {
+		if prompt == "b" {
+			// Slightly different delay to verify ordering.
+			time.Sleep(5 * time.Millisecond)
+		}
+		return prompt, nil
+	}
+	res, err := Run(context.Background(), script, spawn, Options{
+		Progress: func(p Progress) {
+			mu.Lock()
+			events = append(events, p)
+			mu.Unlock()
+		},
+	})
+	require.NoError(t, err)
+	require.JSONEq(t, `"abc"`, res.Value)
+	require.Equal(t, 3, res.AgentCount)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// We expect events in this order:
+	//   log("starting")      → kind=log,   running=0, completed=0, total=0
+	//   agent("a") start     → kind=agent_start, running=1, completed=0, total=1
+	//   agent("a") done      → kind=agent_done,  running=0, completed=1, total=1
+	//   log("mid")           → kind=log,   running=0, completed=1, total=1
+	//   agent("b") start     → kind=agent_start, running=1, completed=1, total=2
+	//   agent("b") done      → kind=agent_done,  running=0, completed=2, total=2
+	//   agent("c") start     → kind=agent_start, running=1, completed=2, total=3
+	//   agent("c") done      → kind=agent_done,  running=0, completed=3, total=3
+
+	require.GreaterOrEqual(t, len(events), 8, "should have at least 8 progress events")
+
+	idx := 0
+	// event 0: log("starting")
+	require.Equal(t, "log", events[idx].Kind)
+	require.Equal(t, -1, events[idx].Index)
+	require.Contains(t, events[idx].Message, "starting")
+	require.Zero(t, events[idx].Running)
+	require.Zero(t, events[idx].Completed)
+	require.Zero(t, events[idx].Total)
+	idx++
+
+	// event 1: agent("a") start
+	require.Equal(t, "agent_start", events[idx].Kind)
+	require.Equal(t, 0, events[idx].Index)
+	require.Equal(t, 1, events[idx].Running)
+	require.Equal(t, 0, events[idx].Completed)
+	require.Equal(t, 1, events[idx].Total)
+	idx++
+
+	// event 2: agent("a") done
+	require.Equal(t, "agent_done", events[idx].Kind)
+	require.Equal(t, 0, events[idx].Index)
+	require.Equal(t, 0, events[idx].Running)
+	require.Equal(t, 1, events[idx].Completed)
+	require.Equal(t, 1, events[idx].Total)
+	idx++
+
+	// event 3: log("mid")
+	require.Equal(t, "log", events[idx].Kind)
+	require.Equal(t, -1, events[idx].Index)
+	require.Equal(t, 0, events[idx].Running)
+	require.Equal(t, 1, events[idx].Completed)
+	require.Equal(t, 1, events[idx].Total)
+	idx++
+
+	// event 4: agent("b") start
+	require.Equal(t, "agent_start", events[idx].Kind)
+	require.Equal(t, 1, events[idx].Index)
+	require.Equal(t, 1, events[idx].Running)
+	require.Equal(t, 1, events[idx].Completed)
+	require.Equal(t, 2, events[idx].Total)
+	// Label is empty
+	require.Empty(t, events[idx].Label)
+	idx++
+
+	// event 5: agent("b") done
+	require.Equal(t, "agent_done", events[idx].Kind)
+	require.Equal(t, 1, events[idx].Index)
+	require.Equal(t, 0, events[idx].Running)
+	require.Equal(t, 2, events[idx].Completed)
+	require.Equal(t, 2, events[idx].Total)
+	idx++
+
+	// event 6: agent("c") start
+	require.Equal(t, "agent_start", events[idx].Kind)
+	require.Equal(t, 2, events[idx].Index)
+	require.Equal(t, 1, events[idx].Running)
+	require.Equal(t, 2, events[idx].Completed)
+	require.Equal(t, 3, events[idx].Total)
+	idx++
+
+	// event 7: agent("c") done
+	require.Equal(t, "agent_done", events[idx].Kind)
+	require.Equal(t, 2, events[idx].Index)
+	require.Equal(t, 0, events[idx].Running)
+	require.Equal(t, 3, events[idx].Completed)
+	require.Equal(t, 3, events[idx].Total)
+}
+
+func TestWorkflowRun_CancelParentContext(t *testing.T) {
+	t.Parallel()
+	script := `
+		local calls = {}
+		for i = 1, 20 do
+			calls[i] = {prompt = "p" .. i}
+		end
+		parallel(calls)
+		return "done"
+	`
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	block := make(chan struct{})
+	spawn := func(_ context.Context, _ int, _, _ string, _ SpawnOpts) (string, error) {
+		<-block
+		return "ok", nil
+	}
+
+	// Let one agent start, then cancel.
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+		close(block)
+	}()
+
+	start := time.Now()
+	_, err := Run(ctx, script, spawn, Options{MaxConcurrent: 1})
+	require.Less(t, time.Since(start), 5*time.Second, "must return promptly after cancel")
+	require.ErrorIs(t, err, context.Canceled)
+}

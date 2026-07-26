@@ -4662,6 +4662,8 @@ func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
 		// busy/queue refresh below.
 	case notify.TypeReAuthenticate:
 		return m.handleReAuthenticate(n.ProviderID)
+	case notify.TypeWorkflowProgress:
+		return m.handleWorkflowProgress(n.WorkflowProgress)
 	default:
 		return nil
 	}
@@ -4678,6 +4680,24 @@ func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
 		cmds = append(cmds, cmd)
 	}
 	return tea.Batch(cmds...)
+}
+
+// handleWorkflowProgress forwards a live workflow progress event to the
+// corresponding WorkflowToolMessageItem in the chat.
+func (m *UI) handleWorkflowProgress(wp *notify.WorkflowProgress) tea.Cmd {
+	if wp == nil {
+		return nil
+	}
+	item := m.chat.MessageItem(wp.ToolCallID)
+	if item == nil {
+		return nil
+	}
+	wf, ok := item.(*chat.WorkflowToolMessageItem)
+	if !ok {
+		return nil
+	}
+	wf.SetProgress(wp.Running, wp.Completed, wp.Total, wp.Kind, wp.Label, wp.Message)
+	return nil
 }
 
 func (m *UI) handleReAuthenticate(providerID string) tea.Cmd {

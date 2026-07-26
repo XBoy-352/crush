@@ -10,11 +10,13 @@ import (
 	"sync"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/agent/prompt"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/workflow"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/permission"
+	"github.com/charmbracelet/crush/internal/pubsub"
 )
 
 //go:embed templates/workflow_tool.md
@@ -267,7 +269,27 @@ func (c *coordinator) workflowTool(ctx context.Context) (fantasy.AgentTool, erro
 				return resp.Content, nil
 			}
 
-			result, err := workflow.Run(ctx, params.Script, spawn, workflow.Options{})
+			progressFn := func(p workflow.Progress) {
+				c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
+					SessionID:  sessionID,
+					Type:       notify.TypeWorkflowProgress,
+					ProviderID: "",
+					WorkflowProgress: &notify.WorkflowProgress{
+						ToolCallID: call.ID,
+						Kind:       p.Kind,
+						Index:      p.Index,
+						Label:      p.Label,
+						Message:    p.Message,
+						Running:    p.Running,
+						Completed:  p.Completed,
+						Total:      p.Total,
+					},
+				})
+			}
+
+			result, err := workflow.Run(ctx, params.Script, spawn, workflow.Options{
+				Progress: progressFn,
+			})
 			if err != nil {
 				if ctx.Err() != nil {
 					return fantasy.ToolResponse{}, err

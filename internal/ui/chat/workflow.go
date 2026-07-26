@@ -2,6 +2,9 @@ package chat
 
 import (
 	"encoding/json"
+	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -19,6 +22,11 @@ type WorkflowToolMessageItem struct {
 	*baseToolMessageItem
 
 	nestedTools []ToolMessageItem
+	running     int
+	completed   int
+	total       int
+	lastLog     string
+	labels      map[int]string // agent index → label
 }
 
 var (
@@ -84,6 +92,41 @@ func (w *WorkflowToolMessageItem) AddNestedTool(tool ToolMessageItem) {
 	w.Bump()
 }
 
+// SetProgress updates live progress state for the workflow.
+func (w *WorkflowToolMessageItem) SetProgress(running, completed, total int, kind, label, msg string) {
+	w.running = running
+	w.completed = completed
+	w.total = total
+	if kind == "log" && msg != "" {
+		w.lastLog = msg
+	}
+	if kind == "agent_start" && label != "" {
+		if w.labels == nil {
+			w.labels = make(map[int]string)
+		}
+		// Use the agent index from the progress; total is the latest agentIndex
+		// so the label's index is total-1 on start (agentIndex was already bumped).
+		w.labels[w.running+w.completed-1] = label
+	}
+	w.clearCache()
+	w.Bump()
+}
+
+// agentLabelIndexRe extracts the agent index from a synthetic tool call ID.
+var agentLabelIndexRe = regexp.MustCompile(`-a(\d+)$`)
+
+// truncateString truncates s to at most max runes, appending "…" if truncated.
+func truncateString(s string, max int) string {
+	if max < 1 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max-1]) + "…"
+}
+
 // WorkflowToolRenderContext renders workflow tool messages.
 type WorkflowToolRenderContext struct {
 	workflow *WorkflowToolMessageItem
@@ -92,7 +135,7 @@ type WorkflowToolRenderContext struct {
 // RenderTool implements the [ToolRenderer] interface.
 func (r *WorkflowToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
 	cappedWidth := cappedMessageWidth(width)
-	if !opts.ToolCall.Finished && !opts.IsCanceled() && len(r.workflow.nestedTools) == 0 {
+	if !opts.ToolCall.Finished && !opts.IsCanceled() && len(r.workflow.nestedTools) == 0 && r.workflow.total == 0 {
 		return pendingTool(sty, "Workflow", opts.Anim, opts.Compact)
 	}
 
@@ -132,6 +175,14 @@ func (r *WorkflowToolRenderContext) RenderTool(sty *styles.Styles, width int, op
 
 	for _, nestedTool := range r.workflow.nestedTools {
 		childView := nestedTool.Render(remainingWidth)
+		// Prefix with agent label when available.
+		if m := agentLabelIndexRe.FindStringSubmatch(nestedTool.ToolCall().ID); len(m) >= 2 {
+			if idx, err := strconv.Atoi(m[1]); err == nil {
+				if label, ok := r.workflow.labels[idx]; ok {
+					childView = fmt.Sprintf("%s %s", label, childView)
+				}
+			}
+		}
 		childTools.Child(childView)
 	}
 
@@ -139,6 +190,17 @@ func (r *WorkflowToolRenderContext) RenderTool(sty *styles.Styles, width int, op
 	parts = append(parts, childTools.Enumerator(roundedEnumerator(2, taskTagWidth-5)).String())
 
 	if !opts.HasResult() && !opts.IsCanceled() {
+		if r.workflow.total > 0 {
+			countsLine := fmt.Sprintf("%d running · %d/%d done", r.workflow.running, r.workflow.completed, r.workflow.total)
+			parts = append(parts, "", countsLine)
+			if r.workflow.lastLog != "" {
+				logWidth := cappedWidth - toolBodyLeftPaddingTotal - 4
+				if logWidth < 20 {
+					logWidth = 20
+				}
+				parts = append(parts, truncateString(r.workflow.lastLog, logWidth))
+			}
+		}
 		parts = append(parts, "", opts.Anim.Render())
 	}
 

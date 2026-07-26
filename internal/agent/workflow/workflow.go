@@ -49,11 +49,27 @@ type SpawnOpts struct {
 // optional display title, prompt the task. Returns the agent's final text.
 type SpawnFunc func(ctx context.Context, index int, label, prompt string, opts SpawnOpts) (string, error)
 
+// ProgressFunc receives workflow state changes. Optional; nil means no reporting.
+// Must be safe to call from multiple goroutines.
+type ProgressFunc func(Progress)
+
+// Progress carries a snapshot of workflow engine state at one point in time.
+type Progress struct {
+	Kind      string // "log" | "agent_start" | "agent_done" | "agent_error"
+	Index     int    // agent index, -1 for log events
+	Label     string // agent label if set
+	Message   string // log text, or error text
+	Running   int    // agents currently executing
+	Completed int    // agents finished (success or error)
+	Total     int    // agents started so far
+}
+
 // Options configures workflow execution limits.
 type Options struct {
-	MaxConcurrent int           // <=0 → DefaultMaxConcurrent
-	MaxAgents     int           // <=0 → DefaultMaxAgents
-	Timeout       time.Duration // <=0 → DefaultTimeout
+	MaxConcurrent int
+	MaxAgents     int
+	Timeout       time.Duration
+	Progress      ProgressFunc
 }
 
 // Result is the outcome of a workflow run.
@@ -68,9 +84,11 @@ type runState struct {
 	spawn SpawnFunc
 	opts  Options
 
-	mu         sync.Mutex
-	logs       []string
-	agentIndex int
+	mu             sync.Mutex
+	logs           []string
+	agentIndex     int
+	runningCount   int
+	completedCount int
 
 	sem chan struct{}
 }
@@ -97,20 +115,47 @@ func (st *runState) reserveIndices(n int) (int, error) {
 	return start, nil
 }
 
+func (st *runState) progress(kind string, idx int, label, msg string) {
+	st.mu.Lock()
+	switch kind {
+	case "agent_start":
+		st.runningCount++
+	case "agent_done", "agent_error":
+		st.runningCount--
+		st.completedCount++
+	}
+	p := Progress{
+		Kind:      kind,
+		Index:     idx,
+		Label:     label,
+		Message:   msg,
+		Running:   st.runningCount,
+		Completed: st.completedCount,
+		Total:     st.agentIndex,
+	}
+	st.mu.Unlock()
+	if st.opts.Progress != nil {
+		st.opts.Progress(p)
+	}
+}
+
 func (st *runState) addLog(msg string) {
 	st.mu.Lock()
-	defer st.mu.Unlock()
 	if len(st.logs) == maxLogEntries {
 		st.logs = append(st.logs, "(further logs dropped)")
+		st.mu.Unlock()
 		return
 	}
 	if len(st.logs) > maxLogEntries {
+		st.mu.Unlock()
 		return
 	}
 	if len(msg) > maxLogEntryBytes {
 		msg = msg[:maxLogEntryBytes]
 	}
 	st.logs = append(st.logs, msg)
+	st.mu.Unlock()
+	st.progress("log", -1, "", msg)
 }
 
 // Run compiles and executes a Lua script. It returns ctx.Err() if
@@ -302,10 +347,15 @@ func registerAgent(L *lua.LState, st *runState) {
 			L.RaiseError("%s", st.ctx.Err().Error())
 		}
 
+		st.progress("agent_start", idx, label, "")
+
 		text, err := st.spawn(st.ctx, idx, label, prompt, spawnOpts)
 		if err != nil {
+			st.progress("agent_error", idx, label, err.Error())
 			L.RaiseError("%s", err.Error())
 		}
+
+		st.progress("agent_done", idx, label, "")
 
 		if isJSON {
 			parsed, err := extractJSON(text)
@@ -443,7 +493,14 @@ func registerParallel(L *lua.LState, st *runState) {
 					}
 				}
 
+				st.progress("agent_start", pc.index, pc.label, "")
+
 				text, err := st.spawn(st.ctx, pc.index, pc.label, pc.prompt, pc.spawnOpts)
+				if err != nil {
+					st.progress("agent_error", pc.index, pc.label, err.Error())
+				} else {
+					st.progress("agent_done", pc.index, pc.label, "")
+				}
 				results[i] = spawnResult{text: text, err: err}
 			}(i, pc)
 		}
