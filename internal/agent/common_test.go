@@ -155,6 +155,14 @@ func coderAgent(r *vcr.Recorder, env fakeEnv, large, small fantasy.LanguageModel
 	cfg.Config().Options.GlobalContextPaths = nil
 	cfg.Config().LSP = nil
 
+	// Pin ls limits so VCR bodies match whether or not the process cwd is a
+	// git worktree. Outside a worktree, config.Init assigns MaxDepth=2 and
+	// MaxItems=100 (see load.go), which injects a depth notice into ls
+	// output and breaks cassette body matching.
+	zero := 0
+	cfg.Config().Tools.Ls.MaxDepth = &zero
+	cfg.Config().Tools.Ls.MaxItems = &zero
+
 	systemPrompt, err := prompt.Build(context.TODO(), large.Provider(), large.Model(), cfg)
 	if err != nil {
 		return nil, err
@@ -181,6 +189,21 @@ func coderAgent(r *vcr.Recorder, env fakeEnv, large, small fantasy.LanguageModel
 	}
 
 	return testSessionAgent(env, large, small, systemPrompt, allTools...), nil
+}
+
+func TestCoderAgentLsLimitsIndependentOfGit(t *testing.T) {
+	t.Parallel()
+	env := testEnv(t)
+	cfg, err := config.Init(env.workingDir, "", false)
+	require.NoError(t, err)
+	// Same pin as coderAgent: effective ls limits must not depend on whether
+	// the process cwd is a git worktree.
+	zero := 0
+	cfg.Config().Tools.Ls.MaxDepth = &zero
+	cfg.Config().Tools.Ls.MaxItems = &zero
+	depth, items := cfg.Config().Tools.Ls.Limits()
+	require.Equal(t, 0, depth)
+	require.Equal(t, 0, items)
 }
 
 // createSimpleGoProject creates a simple Go project structure in the given directory.
