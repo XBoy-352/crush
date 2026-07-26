@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -173,12 +174,26 @@ func (m *BackgroundShellManager) List() []string {
 	return ids
 }
 
-// ListJobs returns all background shells.
+// ListJobs returns all background shells, oldest first.
+//
+// The order must be deterministic: csync.Map.Seq2 ranges over a copy of the
+// underlying Go map, so the raw iteration order is randomized per call. The
+// jobs dialog rebuilds its list from this slice while keeping the selected
+// *index*, so an unordered result both shuffles the rendered list between
+// frames and makes a kill land on a different job than the one the user
+// highlighted. StartedAt is the natural order; ID breaks ties (and orders
+// shells with a zero StartedAt) so the comparison is total.
 func (m *BackgroundShellManager) ListJobs() []*BackgroundShell {
 	jobs := make([]*BackgroundShell, 0, m.shells.Len())
 	for shell := range m.shells.Seq() {
 		jobs = append(jobs, shell)
 	}
+	slices.SortFunc(jobs, func(a, b *BackgroundShell) int {
+		if c := a.StartedAt.Compare(b.StartedAt); c != 0 {
+			return c
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
 	return jobs
 }
 
