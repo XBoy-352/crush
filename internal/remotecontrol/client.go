@@ -46,24 +46,23 @@ type ToolResponsePayload struct {
 	Approved  bool   `json:"approved"`
 }
 
-// Connection liveness and resource limits. These are variables rather than
-// constants so tests can shrink the timers; production code must not mutate
-// them after Connect.
-var (
-	// pongWait is how long a connection may be silent before the read
+// Connection liveness and resource limits. Held per-client rather than as
+// package globals so tests can tune them without racing other tests.
+const (
+	// defaultPongWait is how long a connection may be silent before the read
 	// deadline fires. Without it a half-open TCP connection (peer killed
 	// without sending FIN) blocks ReadJSON forever.
-	pongWait = 60 * time.Second
-	// pingPeriod must be shorter than pongWait so a healthy peer always
-	// refreshes the deadline before it expires.
-	pingPeriod = 50 * time.Second
-	// writeWait bounds a single write so a stalled peer cannot wedge a
-	// sender indefinitely.
-	writeWait = 10 * time.Second
-	// maxMessageSize caps an inbound frame. The relay is remote and
+	defaultPongWait = 60 * time.Second
+	// defaultPingPeriod must be shorter than pongWait so a healthy peer
+	// always refreshes the deadline before it expires.
+	defaultPingPeriod = 50 * time.Second
+	// defaultWriteWait bounds a single write so a stalled peer cannot wedge
+	// a sender indefinitely.
+	defaultWriteWait = 10 * time.Second
+	// defaultMaxMessageSize caps an inbound frame. The relay is remote and
 	// untrusted from this process's point of view; without a limit it can
 	// force unbounded allocation.
-	maxMessageSize int64 = 1 << 20
+	defaultMaxMessageSize int64 = 1 << 20
 )
 
 type Client struct {
@@ -80,6 +79,12 @@ type Client struct {
 	cancelHandler func()
 	closeCh       chan struct{}
 	closeOnce     sync.Once
+
+	// Tunables, fixed at construction time and read-only thereafter.
+	pongWait       time.Duration
+	pingPeriod     time.Duration
+	writeWait      time.Duration
+	maxMessageSize int64
 }
 
 func NewClient(cfg Config) *Client {
@@ -90,9 +95,13 @@ func NewClient(cfg Config) *Client {
 		cfg.Username = "admin"
 	}
 	return &Client{
-		cfg:          cfg,
-		pendingTools: make(map[string]chan bool),
-		closeCh:      make(chan struct{}),
+		cfg:            cfg,
+		pendingTools:   make(map[string]chan bool),
+		closeCh:        make(chan struct{}),
+		pongWait:       defaultPongWait,
+		pingPeriod:     defaultPingPeriod,
+		writeWait:      defaultWriteWait,
+		maxMessageSize: defaultMaxMessageSize,
 	}
 }
 
@@ -150,13 +159,13 @@ func (c *Client) Connect(ctx context.Context, sessionID string) error {
 	}
 
 	// Bound inbound frames and arm the liveness deadline before any read.
-	ws.SetReadLimit(maxMessageSize)
-	if err := ws.SetReadDeadline(time.Now().Add(pongWait)); err != nil {
+	ws.SetReadLimit(c.maxMessageSize)
+	if err := ws.SetReadDeadline(time.Now().Add(c.pongWait)); err != nil {
 		_ = ws.Close()
 		return fmt.Errorf("failed to set read deadline: %w", err)
 	}
 	ws.SetPongHandler(func(string) error {
-		return ws.SetReadDeadline(time.Now().Add(pongWait))
+		return ws.SetReadDeadline(time.Now().Add(c.pongWait))
 	})
 
 	c.mu.Lock()
@@ -193,7 +202,7 @@ func (c *Client) watchContext(ctx context.Context) {
 
 // pingLoop sends periodic pings so a dead peer is detected within pongWait.
 func (c *Client) pingLoop(ws *websocket.Conn) {
-	ticker := time.NewTicker(pingPeriod)
+	ticker := time.NewTicker(c.pingPeriod)
 	defer ticker.Stop()
 
 	for {
@@ -202,7 +211,7 @@ func (c *Client) pingLoop(ws *websocket.Conn) {
 			return
 		case <-ticker.C:
 			c.writeMu.Lock()
-			err := ws.SetWriteDeadline(time.Now().Add(writeWait))
+			err := ws.SetWriteDeadline(time.Now().Add(c.writeWait))
 			if err == nil {
 				err = ws.WriteMessage(websocket.PingMessage, nil)
 			}
@@ -235,7 +244,7 @@ func (c *Client) SendEvent(evtType string, payload json.RawMessage) error {
 	// Exactly one writer at a time, with a bounded write deadline.
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	if err := ws.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
+	if err := ws.SetWriteDeadline(time.Now().Add(c.writeWait)); err != nil {
 		return err
 	}
 

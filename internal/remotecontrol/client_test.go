@@ -69,12 +69,25 @@ func (r *testRelay) send(t *testing.T, conn *websocket.Conn, evtType string, pay
 	require.NoError(t, conn.WriteMessage(websocket.TextMessage, raw))
 }
 
-func connectClient(t *testing.T, r *testRelay, ctx context.Context) *Client {
+// connectClient builds a client, applies any per-client tuning, and connects.
+// Tunables are per-client fields rather than package globals precisely so
+// concurrently running tests cannot race on them.
+func connectClient(t *testing.T, r *testRelay, ctx context.Context, tune ...func(*Client)) *Client {
 	t.Helper()
 	c := NewClient(Config{RelayURL: r.url, Username: "u", Password: "p"})
+	for _, fn := range tune {
+		fn(c)
+	}
 	require.NoError(t, c.Connect(ctx, "test-session"))
 	t.Cleanup(func() { _ = c.Close() })
 	return c
+}
+
+// fastKeepalive shrinks the liveness timers so keepalive behaviour is
+// observable within a test's lifetime.
+func fastKeepalive(c *Client) {
+	c.pongWait = 300 * time.Millisecond
+	c.pingPeriod = 100 * time.Millisecond
 }
 
 // Regression: gorilla/websocket allows exactly one concurrent writer and
@@ -130,7 +143,7 @@ func TestDuplicateToolResponseDoesNotWedgeReadLoop(t *testing.T) {
 // Regression: without SetReadLimit the relay could force the client to
 // allocate an arbitrarily large buffer.
 func TestOversizedFrameIsRejected(t *testing.T) {
-	oversized := strings.Repeat("A", int(maxMessageSize)+4096)
+	oversized := strings.Repeat("A", int(defaultMaxMessageSize)+4096)
 	r := newTestRelay(t, func(conn *websocket.Conn) {
 		go drain(conn)
 		raw := []byte(fmt.Sprintf(`{"type":"send_prompt","payload":{"prompt":%q}}`, oversized))
@@ -171,17 +184,13 @@ func TestContextCancelUnblocksReadLoop(t *testing.T) {
 // Regression: a peer that vanishes without sending FIN must be detected via
 // the read deadline rather than hanging the read loop forever.
 func TestSilentPeerIsDetectedByReadDeadline(t *testing.T) {
-	origPong, origPing := pongWait, pingPeriod
-	pongWait, pingPeriod = 300*time.Millisecond, 100*time.Millisecond
-	t.Cleanup(func() { pongWait, pingPeriod = origPong, origPing })
-
 	// Read the client's frames but never reply to pings: gorilla answers
 	// pings automatically, so suppress that by installing a no-op handler.
 	r := newTestRelay(t, func(conn *websocket.Conn) {
 		conn.SetPingHandler(func(string) error { return nil })
 		go drain(conn)
 	})
-	c := connectClient(t, r, context.Background())
+	c := connectClient(t, r, context.Background(), fastKeepalive)
 
 	select {
 	case <-c.closeCh:
@@ -192,13 +201,9 @@ func TestSilentPeerIsDetectedByReadDeadline(t *testing.T) {
 
 // A healthy peer that answers pings must keep the session open past pongWait.
 func TestPongRefreshesReadDeadline(t *testing.T) {
-	origPong, origPing := pongWait, pingPeriod
-	pongWait, pingPeriod = 300*time.Millisecond, 100*time.Millisecond
-	t.Cleanup(func() { pongWait, pingPeriod = origPong, origPing })
-
 	// Default gorilla ping handler replies with a pong.
 	r := newTestRelay(t, func(conn *websocket.Conn) { go drain(conn) })
-	c := connectClient(t, r, context.Background())
+	c := connectClient(t, r, context.Background(), fastKeepalive)
 
 	select {
 	case <-c.closeCh:
