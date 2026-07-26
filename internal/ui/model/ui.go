@@ -39,6 +39,7 @@ import (
 	"github.com/charmbracelet/crush/internal/fsext"
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/home"
+	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/proto"
@@ -299,8 +300,19 @@ type UI struct {
 		yesInitializeSelected bool
 	}
 
-	// lsp
-	lspStates map[string]workspace.LSPClientInfo
+	// lspStates / lspDiagnostics memoize the workspace LSP state and
+	// per-server severity counts (each probe behind them is a synchronous
+	// HTTP round-trip in client/server mode, and the sidebar, landing view,
+	// and compact header render them every frame). LSP events refresh them
+	// off-thread with a TTL backstop; see lsp.go.
+	lspStates        map[string]workspace.LSPClientInfo
+	lspDiagnostics   map[string]lsp.DiagnosticCounts
+	lspFetchInFlight bool
+	// lspRefreshQueued records that an LSP event arrived while a fetch was
+	// already in flight; applyLSPStates re-dispatches so the freshest state
+	// still lands.
+	lspRefreshQueued bool
+	lspCheckedAt     time.Time
 
 	// pendingRevertText holds the message content to insert into the
 	// textarea after a revert completes.
@@ -370,6 +382,13 @@ type UI struct {
 	// can be manually backgrounded (Ctrl+B). Refreshed with busy probes.
 	fgWaitCache       ttlCache
 	busyFetchInFlight bool
+	// agentReady / agentModel memoize the coordinator readiness and
+	// selected model (AgentIsReady/AgentModel are synchronous HTTP GETs in
+	// client/server mode, and modelInfo renders them every frame). Seeded
+	// once at construction and refreshed by the same off-thread probe as
+	// agentBusyCache.
+	agentReady bool
+	agentModel workspace.AgentModel
 	// busyFetchGen is bumped by every busy/permission state transition;
 	// like promptQueueGen it lets a stale in-flight probe result be
 	// discarded and re-fetched instead of clobbering newer state.
@@ -485,6 +504,14 @@ func New(com *common.Common, initialSessionID string, continueLast bool) *UI {
 	plan := com.Workspace.PermissionPlanMode()
 	ui.yoloCache.set(yolo)
 	ui.planCache.set(plan)
+
+	// Seed the memoized agent ready/model state the same way so the first
+	// frame renders the model info; the busy probe keeps it fresh
+	// afterwards.
+	if com.Workspace.AgentIsReady() {
+		ui.agentReady = true
+		ui.agentModel = com.Workspace.AgentModel()
+	}
 	ui.setEditorPrompt(yolo)
 	ui.randomizePlaceholders()
 	ui.textarea.Placeholder = ui.readyPlaceholder
@@ -529,8 +556,10 @@ func (m *UI) Init() tea.Cmd {
 	cmds = append(cmds, m.loadCustomCommands())
 	// load prompt history async
 	cmds = append(cmds, m.loadPromptHistory())
-	// load initial LSP state
-	m.lspStates = m.com.Workspace.LSPGetStates()
+	// Prime the memoized LSP state off-thread.
+	if cmd := m.requestLSPRefresh(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
 	// load initial session if specified
 	if cmd := m.loadInitialSession(); cmd != nil {
 		cmds = append(cmds, cmd)
@@ -731,6 +760,17 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.applyBusyState(msg)...)
 	case promptQueueMsg:
 		cmds = append(cmds, m.applyPromptQueue(msg)...)
+	case lspStatesMsg:
+		if cmd := m.applyLSPStates(msg); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	case agentModelChangedMsg:
+		// The coordinator model changed (selection, thinking, reasoning):
+		// re-fetch the memoized ready/model state off-thread.
+		m.invalidateBusyCaches()
+		if cmd := m.dispatchBusyRefresh(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	case agentRunSubmittedMsg:
 		// A prompt was just accepted (run started or enqueued): fetch the
 		// authoritative busy/queue state to confirm the optimistic values
@@ -949,9 +989,16 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case pubsub.Event[history.File]:
 		cmds = append(cmds, m.handleFileEvent(msg.Payload))
 	case pubsub.Event[app.LSPEvent]:
-		m.lspStates = m.com.Workspace.LSPGetStates()
+		// Refresh the memoized LSP state off-thread: LSPGetStates is a
+		// synchronous HTTP round-trip in client/server mode and diagnostics
+		// events can arrive per edited file.
+		if cmd := m.requestLSPRefresh(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	case pubsub.Event[workspace.LSPEvent]:
-		m.lspStates = m.com.Workspace.LSPGetStates()
+		if cmd := m.requestLSPRefresh(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	case pubsub.Event[skills.Event]:
 		m.skillStates = msg.Payload.States
 	case pubsub.Event[mcp.Event]:
@@ -2066,7 +2113,7 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		}
 		m.dialog.CloseDialog(dialog.CommandsID)
 	case dialog.ActionToggleThinking:
-		cmds = append(cmds, func() tea.Msg {
+		cmds = append(cmds, tea.Sequence(func() tea.Msg {
 			cfg := m.com.Config()
 			if cfg == nil {
 				return util.ReportError(errors.New("configuration not found"))()
@@ -2088,7 +2135,7 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 				status = "enabled"
 			}
 			return util.NewInfoMsg("Thinking mode " + status)
-		})
+		}, agentModelChangedCmd))
 		m.dialog.CloseDialog(dialog.CommandsID)
 	case dialog.ActionToggleTransparentBackground:
 		cmds = append(cmds, func() tea.Msg {
@@ -2159,10 +2206,10 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			break
 		}
 
-		cmds = append(cmds, func() tea.Msg {
+		cmds = append(cmds, tea.Sequence(func() tea.Msg {
 			m.com.Workspace.UpdateAgentModel(context.TODO())
 			return util.NewInfoMsg("Reasoning effort set to " + msg.Effort)
-		})
+		}, agentModelChangedCmd))
 		m.dialog.CloseDialog(dialog.ReasoningID)
 	case dialog.ActionPermissionResponse:
 		m.dialog.CloseDialog(dialog.PermissionsID)
@@ -2411,7 +2458,7 @@ func (m *UI) handleSelectModel(msg dialog.ActionSelectModel) tea.Cmd {
 		}
 	}
 
-	cmds = append(cmds, func() tea.Msg {
+	cmds = append(cmds, tea.Sequence(func() tea.Msg {
 		if err := m.com.Workspace.UpdateAgentModel(context.TODO()); err != nil {
 			return util.ReportError(err)
 		}
@@ -2426,7 +2473,7 @@ func (m *UI) handleSelectModel(msg dialog.ActionSelectModel) tea.Cmd {
 		modelMsg := fmt.Sprintf("%s model changed to %s", modelType, modelName)
 
 		return util.NewInfoMsg(modelMsg)
-	})
+	}, agentModelChangedCmd))
 
 	m.dialog.CloseDialog(dialog.APIKeyInputID)
 	m.dialog.CloseDialog(dialog.OAuthID)
@@ -2437,6 +2484,13 @@ func (m *UI) handleSelectModel(msg dialog.ActionSelectModel) tea.Cmd {
 		m.com.Config().SetupAgents()
 		if err := m.com.Workspace.InitCoderAgent(context.TODO()); err != nil {
 			cmds = append(cmds, util.ReportError(err))
+		}
+		// The agent just came up: re-fetch the memoized ready/model state
+		// so the landing view shows the selected model without waiting for
+		// the TTL backstop.
+		m.invalidateBusyCaches()
+		if cmd := m.dispatchBusyRefresh(); cmd != nil {
+			cmds = append(cmds, cmd)
 		}
 	} else if m.com.IsHyper() {
 		cmds = append(cmds, m.fetchHyperCredits())
@@ -3039,6 +3093,7 @@ func (m *UI) drawHeader(scr uv.Screen, area uv.Rectangle) {
 		m.isCompact,
 		m.detailsOpen,
 		area.Dx(),
+		m.lspErrorCount(),
 		m.hyperCredits,
 	)
 }
@@ -4491,7 +4546,9 @@ func (m *UI) cancelAgent() tea.Cmd {
 		return nil
 	}
 
-	if !m.com.Workspace.AgentIsReady() {
+	// Gate on the memoized ready state: esc is a hot key and AgentIsReady
+	// is a synchronous HTTP round-trip in client/server mode.
+	if !m.agentReady {
 		return nil
 	}
 

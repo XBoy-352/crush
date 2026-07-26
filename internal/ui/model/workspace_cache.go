@@ -3,28 +3,32 @@ package model
 // Memoized workspace state.
 //
 // In client/server mode every workspace probe (busy checks, permission mode,
-// queued prompts) is a synchronous HTTP round-trip, and the Update goroutine
-// is the render loop — blocking it freezes typing. The UI therefore never
-// probes the workspace synchronously from Update or View:
+// queued prompts, agent readiness/model, LSP state) is a synchronous HTTP
+// round-trip, and the Update goroutine is the render loop — blocking it
+// freezes typing. The UI therefore never probes the workspace synchronously
+// from Update or View:
 //
-//   - Reads (isAgentBusy, yoloModeCached, promptQueue) always return the
-//     memoized value, stale or not.
+//   - Reads (isAgentBusy, yoloModeCached, promptQueue, selectedLargeModel,
+//     lspInfo) always return the memoized value, stale or not.
 //   - State edges (message created, agent finished/errored, prompt
-//     submitted, cancel, session switch, yolo toggle) invalidate or
-//     write through the caches and dispatch an off-thread refresh cmd.
+//     submitted, cancel, session switch, yolo toggle, model change, LSP
+//     events) invalidate or write through the caches and dispatch an
+//     off-thread refresh cmd.
 //   - A TTL backstop at the end of Update re-dispatches a refresh whenever
 //     the memoized state has gone stale, so unrelated churn (typing,
 //     resize storms, spinner ticks) only ever schedules async work.
 //
-// Fresh values arrive as busyStateMsg / promptQueueMsg and are applied on
-// the Update goroutine, per the UI guidelines (no IO in Update, no model
-// mutation inside commands).
+// Fresh values arrive as busyStateMsg / promptQueueMsg / lspStatesMsg and
+// are applied on the Update goroutine, per the UI guidelines (no IO in
+// Update, no model mutation inside commands).
 
 import (
 	"slices"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/charmbracelet/crush/internal/workspace"
 )
 
 // busyCacheTTL bounds how long the memoized busy/permission state may go
@@ -70,6 +74,11 @@ type busyStateMsg struct {
 	yolo               bool
 	plan               bool
 	hasForegroundWaits bool
+	// ready/model memoize the coordinator readiness and selected model,
+	// fetched by the same probe so the sidebar/landing model info renders
+	// from memoized state. Zero (and ignored) when ready is false.
+	ready bool
+	model workspace.AgentModel
 }
 
 // promptQueueMsg delivers the queued prompts fetched off-thread.
@@ -88,6 +97,15 @@ type promptQueueMsg struct {
 // started a run or was enqueued behind one), so busy and queue state should
 // be re-fetched.
 type agentRunSubmittedMsg struct{}
+
+// agentModelChangedMsg reports that the coordinator's model was updated
+// (model selection, thinking toggle, reasoning effort), so the memoized
+// ready/model state should be re-fetched without waiting for the TTL.
+type agentModelChangedMsg struct{}
+
+// agentModelChangedCmd is sequenced after cmds that call UpdateAgentModel so
+// the refresh probes the coordinator only once the update has completed.
+func agentModelChangedCmd() tea.Msg { return agentModelChangedMsg{} }
 
 // currentSessionID returns the active session's ID, or "" when none.
 func (m *UI) currentSessionID() string {
@@ -132,6 +150,7 @@ func (m *UI) dispatchBusyRefresh() tea.Cmd {
 	return func() tea.Msg {
 		st := busyStateMsg{gen: gen}
 		if ws.AgentIsReady() {
+			st.ready = true
 			st.agentBusy = ws.AgentIsBusy()
 			// Only probe for backgroundable tools while the agent is
 			// actually busy: this is a second HTTP round-trip per refresh
@@ -142,6 +161,7 @@ func (m *UI) dispatchBusyRefresh() tea.Cmd {
 			if st.agentBusy && sessionID != "" {
 				st.hasForegroundWaits = ws.AgentHasForegroundWaits(sessionID)
 			}
+			st.model = ws.AgentModel()
 		}
 		st.yolo = ws.PermissionSkipRequests()
 		st.plan = ws.PermissionPlanMode()
@@ -170,6 +190,8 @@ func (m *UI) applyBusyState(msg busyStateMsg) []tea.Cmd {
 	m.yoloCache.set(msg.yolo)
 	m.planCache.set(msg.plan)
 	m.fgWaitCache.set(msg.hasForegroundWaits)
+	m.agentReady = msg.ready
+	m.agentModel = msg.model
 	if prevYolo != msg.yolo || prevPlan != msg.plan {
 		// A remote/async toggle changed yolo or plan mode: update the
 		// editor prompt so the icon/style tracks the new mode. The cache
@@ -270,6 +292,11 @@ func (m *UI) staleWorkspaceRefreshCmds() []tea.Cmd {
 	}
 	if m.hasSession() && time.Since(m.promptQueueCheckedAt) >= promptQueueTTL {
 		if cmd := m.dispatchPromptQueueRefresh(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	if time.Since(m.lspCheckedAt) >= lspStatesTTL {
+		if cmd := m.dispatchLSPRefresh(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 	}
