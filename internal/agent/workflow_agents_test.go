@@ -60,7 +60,10 @@ func newModelPinningCoordinator(t *testing.T) (*coordinator, string, string) {
 // being declared but never read: every agent ran on the large model, so a
 // workflow sub-agent asking for the small model silently billed the large one.
 func TestBuildAgentHonoursPinnedModel(t *testing.T) {
-	t.Parallel()
+	// Deliberately not t.Parallel(): the subtests share one coordinator and
+	// build real agents off it, and -race cannot run on every dev host, so
+	// parallelising them would be an unverifiable change. tparallel then
+	// requires the subtests to stay serial too.
 
 	c, largeModelID, smallModelID := newModelPinningCoordinator(t)
 	prmpt, err := taskPrompt(prompt.WithWorkingDir(c.cfg.WorkingDir()))
@@ -91,7 +94,10 @@ func TestBuildAgentHonoursPinnedModel(t *testing.T) {
 // SpawnOpts.Model was parsed and validated by the engine and then had no reader
 // at all in workflow_tool.go, so model="small" was accepted and ignored.
 func TestWorkflowAgentsSelectsByProfileAndModel(t *testing.T) {
-	t.Parallel()
+	// Deliberately not t.Parallel(): the subtests share one coordinator and
+	// build real agents off it, and -race cannot run on every dev host, so
+	// parallelising them would be an unverifiable change. tparallel then
+	// requires the subtests to stay serial too.
 
 	c, largeModelID, smallModelID := newModelPinningCoordinator(t)
 	// The same factory workflowTool installs, so the assertion covers the real
@@ -207,6 +213,7 @@ func TestWorkflowSpawnKeyCarriesModel(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			require.Equal(t, tc.want, workflowSpawnKey(tc.opts))
 		})
 	}
