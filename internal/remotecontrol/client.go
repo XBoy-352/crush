@@ -46,15 +46,40 @@ type ToolResponsePayload struct {
 	Approved  bool   `json:"approved"`
 }
 
+// Connection liveness and resource limits. These are variables rather than
+// constants so tests can shrink the timers; production code must not mutate
+// them after Connect.
+var (
+	// pongWait is how long a connection may be silent before the read
+	// deadline fires. Without it a half-open TCP connection (peer killed
+	// without sending FIN) blocks ReadJSON forever.
+	pongWait = 60 * time.Second
+	// pingPeriod must be shorter than pongWait so a healthy peer always
+	// refreshes the deadline before it expires.
+	pingPeriod = 50 * time.Second
+	// writeWait bounds a single write so a stalled peer cannot wedge a
+	// sender indefinitely.
+	writeWait = 10 * time.Second
+	// maxMessageSize caps an inbound frame. The relay is remote and
+	// untrusted from this process's point of view; without a limit it can
+	// force unbounded allocation.
+	maxMessageSize int64 = 1 << 20
+)
+
 type Client struct {
-	cfg           Config
-	ws            *websocket.Conn
-	sessionID     string
-	mu            sync.RWMutex
+	cfg       Config
+	ws        *websocket.Conn
+	sessionID string
+	mu        sync.RWMutex
+	// writeMu serialises writes. gorilla/websocket permits exactly one
+	// concurrent writer and panics otherwise; mu is an RWMutex, so holding
+	// it for read does NOT provide that guarantee.
+	writeMu       sync.Mutex
 	pendingTools  map[string]chan bool
 	promptHandler func(prompt string)
 	cancelHandler func()
 	closeCh       chan struct{}
+	closeOnce     sync.Once
 }
 
 func NewClient(cfg Config) *Client {
@@ -124,6 +149,16 @@ func (c *Client) Connect(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("failed to connect websocket: %w", err)
 	}
 
+	// Bound inbound frames and arm the liveness deadline before any read.
+	ws.SetReadLimit(maxMessageSize)
+	if err := ws.SetReadDeadline(time.Now().Add(pongWait)); err != nil {
+		_ = ws.Close()
+		return fmt.Errorf("failed to set read deadline: %w", err)
+	}
+	ws.SetPongHandler(func(string) error {
+		return ws.SetReadDeadline(time.Now().Add(pongWait))
+	})
+
 	c.mu.Lock()
 	c.ws = ws
 	c.mu.Unlock()
@@ -138,26 +173,73 @@ func (c *Client) Connect(ctx context.Context, sessionID string) error {
 
 	// Start reader loop
 	go c.readLoop()
+	// Keepalive: detects a peer that has gone away without closing.
+	go c.pingLoop(ws)
+	// gorilla/websocket reads do not observe context cancellation; the only
+	// way to unblock a blocked ReadJSON is to close the connection.
+	go c.watchContext(ctx)
 
 	return nil
 }
 
+// watchContext closes the connection when ctx is cancelled, unblocking readLoop.
+func (c *Client) watchContext(ctx context.Context) {
+	select {
+	case <-ctx.Done():
+		_ = c.Close()
+	case <-c.closeCh:
+	}
+}
+
+// pingLoop sends periodic pings so a dead peer is detected within pongWait.
+func (c *Client) pingLoop(ws *websocket.Conn) {
+	ticker := time.NewTicker(pingPeriod)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.closeCh:
+			return
+		case <-ticker.C:
+			c.writeMu.Lock()
+			err := ws.SetWriteDeadline(time.Now().Add(writeWait))
+			if err == nil {
+				err = ws.WriteMessage(websocket.PingMessage, nil)
+			}
+			c.writeMu.Unlock()
+			if err != nil {
+				slog.Debug("Remote control ping failed", "err", err)
+				return
+			}
+		}
+	}
+}
+
 func (c *Client) SendEvent(evtType string, payload json.RawMessage) error {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
+	ws := c.ws
+	sessionID := c.sessionID
+	c.mu.RUnlock()
 
-	if c.ws == nil {
+	if ws == nil {
 		return fmt.Errorf("websocket not connected")
 	}
 
 	msg := EventMessage{
 		Type:      evtType,
-		SessionID: c.sessionID,
+		SessionID: sessionID,
 		Payload:   payload,
 		Timestamp: time.Now().Unix(),
 	}
 
-	return c.ws.WriteJSON(msg)
+	// Exactly one writer at a time, with a bounded write deadline.
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if err := ws.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
+		return err
+	}
+
+	return ws.WriteJSON(msg)
 }
 
 func (c *Client) SendStreamChunk(role, content string) error {
@@ -202,7 +284,7 @@ func (c *Client) RequestToolApproval(ctx context.Context, reqID, toolName, desc,
 
 func (c *Client) readLoop() {
 	defer func() {
-		close(c.closeCh)
+		c.closeOnce.Do(func() { close(c.closeCh) })
 	}()
 
 	for {
@@ -241,7 +323,13 @@ func (c *Client) readLoop() {
 				ch, ok := c.pendingTools[tResp.RequestID]
 				c.mu.RUnlock()
 				if ok {
-					ch <- tResp.Approved
+					// Never block the read loop: the waiter may have
+					// already given up, and a duplicate response for the
+					// same request id would otherwise wedge it forever.
+					select {
+					case ch <- tResp.Approved:
+					default:
+					}
 				}
 			}
 
