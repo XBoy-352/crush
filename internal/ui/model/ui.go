@@ -44,6 +44,7 @@ import (
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/question"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/charmbracelet/crush/internal/skills"
 	"github.com/charmbracelet/crush/internal/stringext"
 	"github.com/charmbracelet/crush/internal/ui/anim"
@@ -2135,6 +2136,16 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		// revert scope dialog next.
 		m.dialog.CloseDialog(dialog.RevertPickerID)
 		m.dialog.OpenDialog(dialog.NewRevert(m.com, msg.MessageID, msg.MessageContent))
+
+	// ActionKillJob kills a background shell job.
+	case dialog.ActionKillJob:
+		m.dialog.CloseDialog(dialog.JobsID)
+		manager := shell.GetBackgroundShellManager()
+		if err := manager.Kill(msg.ShellID); err != nil {
+			cmds = append(cmds, util.ReportError(err))
+		} else {
+			cmds = append(cmds, util.ReportInfo("Killed job "+msg.ShellID))
+		}
 	default:
 		cmds = append(cmds, util.CmdHandler(msg))
 	}
@@ -2500,9 +2511,11 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 
 	// Move blocking bash tools to background without canceling the turn.
 	// Only intercept when something is actually waiting; otherwise leave
-	// ctrl+b for the textarea (character-backward) while the user types.
+	// ctrl+b for the textarea (character-backward) while the user typing.
+	// When the fgWait cache is stale (the ~500ms window after bash starts)
+	// we probe directly to avoid falling through to the textarea.
 	if key.Matches(msg, m.keyMap.Chat.Background) {
-		if m.isAgentBusy() && m.hasForegroundWaitsCached() {
+		if m.isAgentBusy() && (m.hasForegroundWaitsCached() || !m.fgWaitCache.fresh(busyCacheTTL)) {
 			if cmd := m.backgroundForegroundTools(); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
@@ -4399,6 +4412,10 @@ func (m *UI) openDialog(id string) tea.Cmd {
 		if cmd := m.openBtwDialog(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+	case dialog.JobsID:
+		if cmd := m.openJobsDialog(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	default:
 		// Unknown dialog
 		break
@@ -4430,6 +4447,20 @@ func (m *UI) openQuitDialog() tea.Cmd {
 
 	quitDialog := dialog.NewQuit(m.com)
 	m.dialog.OpenDialog(quitDialog)
+	return nil
+}
+
+// openJobsDialog opens the background jobs dialog.
+func (m *UI) openJobsDialog() tea.Cmd {
+	if m.dialog.ContainsDialog(dialog.JobsID) {
+		m.dialog.BringToFront(dialog.JobsID)
+		return nil
+	}
+	jobsDialog, err := dialog.NewJobs(m.com)
+	if err != nil {
+		return util.ReportError(err)
+	}
+	m.dialog.OpenDialog(jobsDialog)
 	return nil
 }
 

@@ -50,6 +50,7 @@ type BackgroundShell struct {
 	Description string
 	Shell       *Shell
 	WorkingDir  string
+	StartedAt   time.Time // When the shell was started (zero if internal)
 	ctx         context.Context
 	cancel      context.CancelFunc
 	stdout      *syncBuffer
@@ -106,6 +107,7 @@ func (m *BackgroundShellManager) Start(ctx context.Context, workingDir string, b
 		Command:     command,
 		Description: description,
 		WorkingDir:  workingDir,
+		StartedAt:   time.Now(),
 		Shell:       shell,
 		ctx:         shellCtx,
 		cancel:      cancel,
@@ -169,6 +171,15 @@ func (m *BackgroundShellManager) List() []string {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+// ListJobs returns all background shells.
+func (m *BackgroundShellManager) ListJobs() []*BackgroundShell {
+	jobs := make([]*BackgroundShell, 0, m.shells.Len())
+	for shell := range m.shells.Seq() {
+		jobs = append(jobs, shell)
+	}
+	return jobs
 }
 
 // Cleanup removes completed jobs that have been finished for more than the retention period
