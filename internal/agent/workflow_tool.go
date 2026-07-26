@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"charm.land/fantasy"
@@ -27,22 +28,66 @@ type WorkflowParams struct {
 	Script      string `json:"script" description:"Lua orchestration script; see tool description for the API"`
 }
 
+// workflowAgents holds pre-built agents for each profile so that
+// spawn can pick the right one without re-creating them per call.
+type workflowAgents struct {
+	task  SessionAgent
+	coder SessionAgent
+}
+
+// stripWorkflowTool returns a copy of the agent config with the
+// "workflow" tool removed from AllowedTools. This prevents recursive
+// fan-out: a subagent must never invoke the workflow tool itself.
+func stripWorkflowTool(agent config.Agent) config.Agent {
+	agent.AllowedTools = slices.DeleteFunc(
+		slices.Clone(agent.AllowedTools),
+		func(s string) bool { return s == WorkflowToolName },
+	)
+	return agent
+}
+
 func (c *coordinator) workflowTool(ctx context.Context) (fantasy.AgentTool, error) {
-	agentCfg, ok := c.cfg.Config().Agents[config.AgentTask]
+	// Build agents for both profiles, stripping the workflow tool
+	// from each to prevent recursive fan-out (safety 3a).
+	taskCfg, ok := c.cfg.Config().Agents[config.AgentTask]
 	if !ok {
 		return nil, errors.New("task agent configuration not found")
 	}
+	taskCfg = stripWorkflowTool(taskCfg)
 
-	prmpt, err := taskPrompt(
+	coderCfg, ok := c.cfg.Config().Agents[config.AgentCoder]
+	if !ok {
+		return nil, errors.New("coder agent configuration not found")
+	}
+	coderCfg = stripWorkflowTool(coderCfg)
+
+	taskPrmpt, err := taskPrompt(
 		prompt.WithWorkingDir(c.cfg.WorkingDir()),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build task prompt: %w", err)
 	}
 
-	agent, err := c.buildAgent(ctx, prmpt, agentCfg, true)
+	coderPrmpt, err := coderPrompt(
+		prompt.WithWorkingDir(c.cfg.WorkingDir()),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build coder prompt: %w", err)
+	}
+
+	taskAgent, err := c.buildAgent(ctx, taskPrmpt, taskCfg, true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build task agent: %w", err)
+	}
+
+	coderAgent, err := c.buildAgent(ctx, coderPrmpt, coderCfg, true)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build coder agent: %w", err)
+	}
+
+	agents := workflowAgents{
+		task:  taskAgent,
+		coder: coderAgent,
 	}
 
 	return fantasy.NewAgentTool(
@@ -68,13 +113,22 @@ func (c *coordinator) workflowTool(ctx context.Context) (fantasy.AgentTool, erro
 				return fantasy.ToolResponse{}, errors.New("message context missing")
 			}
 
+			// Safety 3c: count coder-profile agents in the script
+			// so the permission prompt can state what write
+			// capabilities are requested.
+			coderCount := countCoderAgents(params.Script)
+			desc := params.Description
+			if coderCount > 0 {
+				desc = fmt.Sprintf("%s [%d write-capable (coder) agent(s) requested]", desc, coderCount)
+			}
+
 			p, err := c.permissions.Request(ctx, permission.CreatePermissionRequest{
 				SessionID:   sessionID,
 				Path:        c.cfg.WorkingDir(),
 				ToolCallID:  call.ID,
 				ToolName:    WorkflowToolName,
 				Action:      "execute",
-				Description: params.Description,
+				Description: desc,
 				Params:      params,
 			})
 			if err != nil {
@@ -84,19 +138,40 @@ func (c *coordinator) workflowTool(ctx context.Context) (fantasy.AgentTool, erro
 				return tools.NewPermissionDeniedResponse(), nil
 			}
 
-			spawn := func(ctx context.Context, index int, label, prompt string) (string, error) {
+			spawn := func(ctx context.Context, index int, label, prompt string, opts workflow.SpawnOpts) (string, error) {
 				title := label
 				if title == "" {
 					title = fmt.Sprintf("Workflow Agent %d", index+1)
 				}
-				resp, err := c.runSubAgent(ctx, subAgentParams{
+
+				// Select the agent based on the requested profile.
+				// Empty defaults to "task" to preserve existing behaviour.
+				agent := agents.task
+				if opts.Agent == "coder" {
+					agent = agents.coder
+				}
+
+				subParams := subAgentParams{
 					Agent:          agent,
 					SessionID:      sessionID,
 					AgentMessageID: agentMessageID,
 					ToolCallID:     fmt.Sprintf("%s-a%d", call.ID, index),
 					Prompt:         prompt,
 					SessionTitle:   title,
-				})
+				}
+
+				// Coder-profile subagents auto-approve their
+				// session so that writes don't prompt individually
+				// (the single workflow permission covers them).
+				// Task-profile subagents are read-only and don't
+				// need auto-approval.
+				if opts.Agent == "coder" {
+					subParams.SessionSetup = func(id string) {
+						c.permissions.AutoApproveSession(id)
+					}
+				}
+
+				resp, err := c.runSubAgent(ctx, subParams)
 				if err != nil {
 					return "", err
 				}
@@ -154,4 +229,20 @@ func (c *coordinator) workflowTool(ctx context.Context) (fantasy.AgentTool, erro
 			), nil
 		},
 	), nil
+}
+
+// countCoderAgents does a best-effort count of coder-profile agents
+// in a Lua script by looking for agent = "coder" patterns. This is
+// used to enrich the permission prompt (safety 3c).
+func countCoderAgents(script string) int {
+	count := 0
+	for _, pattern := range []string{
+		`agent = "coder"`,
+		`agent = 'coder'`,
+		`agent="coder"`,
+		`agent='coder'`,
+	} {
+		count += strings.Count(script, pattern)
+	}
+	return count
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -26,7 +27,7 @@ func TestWorkflowRun_Basic(t *testing.T) {
 		log("got " .. res)
 		return { result = res }
 	`
-	spawn := func(ctx context.Context, index int, label, prompt string) (string, error) {
+	spawn := func(_ context.Context, _ int, _, prompt string, _ SpawnOpts) (string, error) {
 		require.Equal(t, "hello", prompt)
 		return "world", nil
 	}
@@ -95,7 +96,7 @@ func TestWorkflowRun_AgentErrors(t *testing.T) {
 			if ok then return "fail" end
 			return err
 		`
-		spawn := func(ctx context.Context, index int, label, prompt string) (string, error) {
+		spawn := func(_ context.Context, _ int, _, _ string, _ SpawnOpts) (string, error) {
 			return "", errors.New("boom")
 		}
 		res, err := Run(context.Background(), script, spawn, Options{})
@@ -113,7 +114,7 @@ func TestWorkflowRun_Parallel(t *testing.T) {
 		})
 		return res
 	`
-	spawn := func(ctx context.Context, index int, label, prompt string) (string, error) {
+	spawn := func(_ context.Context, _ int, label, prompt string, _ SpawnOpts) (string, error) {
 		assert.NotEmpty(t, prompt)
 		if prompt == "a" {
 			assert.Equal(t, "l1", label)
@@ -151,7 +152,7 @@ func TestWorkflowRun_ParallelValidation(t *testing.T) {
 		return err
 	`
 	var called atomic.Bool
-	spawn := func(ctx context.Context, index int, label, prompt string) (string, error) {
+	spawn := func(_ context.Context, _ int, _, _ string, _ SpawnOpts) (string, error) {
 		called.Store(true)
 		return "", nil
 	}
@@ -172,7 +173,7 @@ func TestWorkflowRun_Concurrency(t *testing.T) {
 	`
 	var active int32
 	var maxActive int32
-	spawn := func(ctx context.Context, index int, label, prompt string) (string, error) {
+	spawn := func(_ context.Context, _ int, _, _ string, _ SpawnOpts) (string, error) {
 		v := atomic.AddInt32(&active, 1)
 		for {
 			cur := atomic.LoadInt32(&maxActive)
@@ -208,7 +209,7 @@ func TestWorkflowRun_Caps(t *testing.T) {
 		end
 		return i
 	`
-	spawn := func(ctx context.Context, index int, label, prompt string) (string, error) {
+	spawn := func(_ context.Context, _ int, _, _ string, _ SpawnOpts) (string, error) {
 		return "ok", nil
 	}
 	res, err := Run(context.Background(), script, spawn, Options{MaxAgents: 5})
@@ -266,7 +267,7 @@ func TestWorkflowRun_AgentJSON(t *testing.T) {
 		local res = agent("foo", {json = true})
 		return res
 	`
-	spawn := func(ctx context.Context, index int, label, prompt string) (string, error) {
+	spawn := func(_ context.Context, _ int, _, _ string, _ SpawnOpts) (string, error) {
 		return "```json\n{\"foo\":\"bar\"}\n```", nil
 	}
 	res, err := Run(context.Background(), script, spawn, Options{})
@@ -296,7 +297,7 @@ func TestWorkflowRun_LoopUntilDry(t *testing.T) {
 		return items
 	`
 	callCount := 0
-	spawn := func(ctx context.Context, index int, label, prompt string) (string, error) {
+	spawn := func(_ context.Context, _ int, _, _ string, _ SpawnOpts) (string, error) {
 		callCount++
 		if callCount == 1 {
 			return `["a", "b"]`, nil
@@ -381,7 +382,7 @@ func TestWorkflowRun_ParallelJSONExtractionError(t *testing.T) {
 		})
 		return res
 	`
-	spawn := func(ctx context.Context, index int, label, prompt string) (string, error) {
+	spawn := func(_ context.Context, _ int, _, _ string, _ SpawnOpts) (string, error) {
 		return "not json at all", nil
 	}
 	res, err := Run(context.Background(), script, spawn, Options{})
@@ -392,4 +393,121 @@ func TestWorkflowRun_ParallelJSONExtractionError(t *testing.T) {
 	require.Len(t, arr, 1)
 	require.Equal(t, false, arr[0]["ok"])
 	require.Contains(t, arr[0]["error"].(string), "no JSON")
+}
+
+func TestWorkflowRun_AgentOptsPassthrough(t *testing.T) {
+	t.Parallel()
+	script := `
+		agent("do-stuff", {model = "small", agent = "coder"})
+	`
+	var got SpawnOpts
+	spawn := func(_ context.Context, _ int, _, _ string, opts SpawnOpts) (string, error) {
+		got = opts
+		return "ok", nil
+	}
+	_, err := Run(context.Background(), script, spawn, Options{})
+	require.NoError(t, err)
+	require.Equal(t, "small", got.Model)
+	require.Equal(t, "coder", got.Agent)
+}
+
+func TestWorkflowRun_ParallelOptsPassthrough(t *testing.T) {
+	t.Parallel()
+	script := `
+		parallel({
+			{prompt = "a", model = "large", agent = "task"},
+			{prompt = "b", agent = "coder"}
+		})
+	`
+	var mu sync.Mutex
+	got := map[string]SpawnOpts{}
+	spawn := func(_ context.Context, _ int, _, prompt string, opts SpawnOpts) (string, error) {
+		mu.Lock()
+		got[prompt] = opts
+		mu.Unlock()
+		return "ok", nil
+	}
+	_, err := Run(context.Background(), script, spawn, Options{})
+	require.NoError(t, err)
+	require.Equal(t, SpawnOpts{Model: "large", Agent: "task"}, got["a"])
+	require.Equal(t, SpawnOpts{Agent: "coder"}, got["b"])
+}
+
+func TestWorkflowRun_InvalidModel(t *testing.T) {
+	t.Parallel()
+	script := `
+		local ok, err = pcall(function()
+			agent("do-stuff", {model = "medium"})
+		end)
+		if ok then return "fail" end
+		return err
+	`
+	res, err := Run(context.Background(), script, nil, Options{})
+	require.NoError(t, err)
+	require.Contains(t, res.Value, "invalid model")
+	require.Contains(t, res.Value, "large, small")
+}
+
+func TestWorkflowRun_InvalidAgent(t *testing.T) {
+	t.Parallel()
+	script := `
+		local ok, err = pcall(function()
+			agent("do-stuff", {agent = "planner"})
+		end)
+		if ok then return "fail" end
+		return err
+	`
+	res, err := Run(context.Background(), script, nil, Options{})
+	require.NoError(t, err)
+	require.Contains(t, res.Value, "invalid agent")
+	require.Contains(t, res.Value, "task, coder")
+}
+
+// TestWorkflowRun_CoderParallelSerialised asserts safety 3b: a parallel
+// batch containing any agent="coder" entry must never run two agents at
+// the same time, even when MaxConcurrent is > 1.
+func TestWorkflowRun_CoderParallelSerialised(t *testing.T) {
+	t.Parallel()
+	script := `
+		local calls = {}
+		for i = 1, 5 do
+			calls[i] = {prompt = "p" .. i, agent = "coder"}
+		end
+		parallel(calls)
+	`
+	var active int32
+	var maxActive int32
+	spawn := func(_ context.Context, _ int, _, _ string, _ SpawnOpts) (string, error) {
+		v := atomic.AddInt32(&active, 1)
+		for {
+			cur := atomic.LoadInt32(&maxActive)
+			if v <= cur || atomic.CompareAndSwapInt32(&maxActive, cur, v) {
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+		atomic.AddInt32(&active, -1)
+		return "ok", nil
+	}
+	res, err := Run(context.Background(), script, spawn, Options{MaxConcurrent: 5, MaxAgents: 10})
+	require.NoError(t, err)
+	require.Equal(t, 5, res.AgentCount)
+	require.Equal(t, int32(1), atomic.LoadInt32(&maxActive),
+		"coder batch must serialise: max concurrent should be 1")
+}
+
+func TestWorkflowRun_DefaultsPreserved(t *testing.T) {
+	t.Parallel()
+	script := `
+		agent("plain-call")
+	`
+	var got SpawnOpts
+	spawn := func(_ context.Context, _ int, _, _ string, opts SpawnOpts) (string, error) {
+		got = opts
+		return "ok", nil
+	}
+	_, err := Run(context.Background(), script, spawn, Options{})
+	require.NoError(t, err)
+	require.Equal(t, "", got.Model, "default model should be empty (inherit)")
+	require.Equal(t, "", got.Agent, "default agent should be empty (task)")
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -23,10 +24,24 @@ const (
 	maxJSONDepth         = 100
 )
 
+// Valid values for the "model" option in agent()/parallel().
+var ValidModels = []string{"large", "small"}
+
+// Valid values for the "agent" option in agent()/parallel().
+var ValidAgentProfiles = []string{"task", "coder"}
+
+// SpawnOpts carries the per-spawn options extracted from the Lua script.
+// The workflow engine passes them through verbatim; the caller
+// (workflow_tool.go) resolves them to real agent configs.
+type SpawnOpts struct {
+	Model string // "large", "small", or "" (inherit profile default).
+	Agent string // "task", "coder", or "" (defaults to "task").
+}
+
 // SpawnFunc runs one subagent. index is the global 0-based agent index
 // (unique per workflow run, used for synthetic tool-call IDs), label an
 // optional display title, prompt the task. Returns the agent's final text.
-type SpawnFunc func(ctx context.Context, index int, label, prompt string) (string, error)
+type SpawnFunc func(ctx context.Context, index int, label, prompt string, opts SpawnOpts) (string, error)
 
 // Options configures workflow execution limits.
 type Options struct {
@@ -246,6 +261,7 @@ func registerAgent(L *lua.LState, st *runState) {
 		}
 
 		var label string
+		var spawnOpts SpawnOpts
 		isJSON := false
 		if L.GetTop() > 1 {
 			opts := L.Get(2)
@@ -256,6 +272,7 @@ func registerAgent(L *lua.LState, st *runState) {
 				if j := t.RawGetString("json"); j != lua.LNil {
 					isJSON = lua.LVAsBool(j)
 				}
+				spawnOpts = parseSpawnOpts(L, t)
 			}
 		}
 
@@ -271,7 +288,7 @@ func registerAgent(L *lua.LState, st *runState) {
 			L.RaiseError("%s", st.ctx.Err().Error())
 		}
 
-		text, err := st.spawn(st.ctx, idx, label, prompt)
+		text, err := st.spawn(st.ctx, idx, label, prompt, spawnOpts)
 		if err != nil {
 			L.RaiseError("%s", err.Error())
 		}
@@ -294,6 +311,25 @@ func registerAgent(L *lua.LState, st *runState) {
 	}))
 }
 
+// parseSpawnOpts extracts and validates the model/agent options from a
+// Lua options table. It raises a Lua error on unknown values.
+func parseSpawnOpts(L *lua.LState, t *lua.LTable) SpawnOpts {
+	var opts SpawnOpts
+	if v := t.RawGetString("model"); v != lua.LNil {
+		opts.Model = lua.LVAsString(v)
+		if !slices.Contains(ValidModels, opts.Model) {
+			L.RaiseError("invalid model %q; valid values: %s", opts.Model, strings.Join(ValidModels, ", "))
+		}
+	}
+	if v := t.RawGetString("agent"); v != lua.LNil {
+		opts.Agent = lua.LVAsString(v)
+		if !slices.Contains(ValidAgentProfiles, opts.Agent) {
+			L.RaiseError("invalid agent %q; valid values: %s", opts.Agent, strings.Join(ValidAgentProfiles, ", "))
+		}
+	}
+	return opts
+}
+
 func registerParallel(L *lua.LState, st *runState) {
 	L.SetGlobal("parallel", L.NewFunction(func(L *lua.LState) int {
 		if L.GetTop() == 0 {
@@ -306,12 +342,14 @@ func registerParallel(L *lua.LState, st *runState) {
 		}
 
 		type parsedCall struct {
-			index  int
-			prompt string
-			label  string
-			isJSON bool
+			index     int
+			prompt    string
+			label     string
+			isJSON    bool
+			spawnOpts SpawnOpts
 		}
 		parsed := make([]parsedCall, len(calls))
+		hasCoder := false
 
 		for i, c := range calls {
 			m, ok := c.(*lua.LTable)
@@ -330,10 +368,15 @@ func registerParallel(L *lua.LState, st *runState) {
 			if j := m.RawGetString("json"); j != lua.LNil {
 				isJSON = lua.LVAsBool(j)
 			}
+			so := parseSpawnOpts(L, m)
+			if so.Agent == "coder" {
+				hasCoder = true
+			}
 			parsed[i] = parsedCall{
-				prompt: p,
-				label:  label,
-				isJSON: isJSON,
+				prompt:    p,
+				label:     label,
+				isJSON:    isJSON,
+				spawnOpts: so,
 			}
 		}
 
@@ -343,6 +386,15 @@ func registerParallel(L *lua.LState, st *runState) {
 		}
 		for i := range parsed {
 			parsed[i].index = startIdx + i
+		}
+
+		// Safety 3b: if any entry requests agent="coder", force
+		// serialisation to prevent concurrent writers corrupting
+		// files in the shared working tree. Worktree isolation is
+		// the better long-term answer but out of scope.
+		var batchSem chan struct{}
+		if hasCoder {
+			batchSem = make(chan struct{}, 1)
 		}
 
 		type spawnResult struct {
@@ -355,6 +407,8 @@ func registerParallel(L *lua.LState, st *runState) {
 			wg.Add(1)
 			go func(i int, pc parsedCall) {
 				defer wg.Done()
+
+				// Acquire the global concurrency semaphore.
 				select {
 				case st.sem <- struct{}{}:
 					defer func() { <-st.sem }()
@@ -362,7 +416,20 @@ func registerParallel(L *lua.LState, st *runState) {
 					results[i] = spawnResult{err: st.ctx.Err()}
 					return
 				}
-				text, err := st.spawn(st.ctx, pc.index, pc.label, pc.prompt)
+
+				// For coder batches, also acquire the batch-level
+				// serialisation semaphore.
+				if batchSem != nil {
+					select {
+					case batchSem <- struct{}{}:
+						defer func() { <-batchSem }()
+					case <-st.ctx.Done():
+						results[i] = spawnResult{err: st.ctx.Err()}
+						return
+					}
+				}
+
+				text, err := st.spawn(st.ctx, pc.index, pc.label, pc.prompt, pc.spawnOpts)
 				results[i] = spawnResult{text: text, err: err}
 			}(i, pc)
 		}
