@@ -1,6 +1,7 @@
 package projects
 
 import (
+	"fmt"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -232,5 +233,78 @@ func TestRegisterOrdersTiedTimestamps(t *testing.T) {
 	}
 	if len(projects) != 3 {
 		t.Errorf("re-register duplicated an entry: got %d projects", len(projects))
+	}
+}
+
+func TestRegisterCapsAtMaxEntries(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", tmpDir)
+	t.Setenv("CRUSH_GLOBAL_DATA", filepath.Join(tmpDir, "crush"))
+
+	// Build list with MaxEntries+10 projects via Save (not Register).
+	list := &ProjectList{}
+	for i := range MaxEntries + 10 {
+		list.Projects = append(list.Projects, Project{
+			Path:         fmt.Sprintf("/p%d", i),
+			DataDir:      fmt.Sprintf("/p%d/.crush", i),
+			LastAccessed: time.Now().UTC(),
+		})
+	}
+	if err := Save(list); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	// Register one new project.
+	newPath := "/new-project"
+	if err := Register(newPath, newPath+"/.crush"); err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+
+	loaded, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	if n := len(loaded.Projects); n > MaxEntries {
+		t.Errorf("got %d projects after Register, want <= %d", n, MaxEntries)
+	}
+
+	found := false
+	for _, p := range loaded.Projects {
+		if p.Path == newPath {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("registered path not found in project list")
+	}
+}
+
+func BenchmarkRegisterCap(b *testing.B) {
+	for _, n := range []int{0, 100, 500, 1000, MaxEntries, 2500} {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			tmpDir := b.TempDir()
+			b.Setenv("XDG_DATA_HOME", tmpDir)
+			b.Setenv("CRUSH_GLOBAL_DATA", filepath.Join(tmpDir, "crush"))
+
+			// Pre-seed via Save, never loop Register for seeding.
+			list := &ProjectList{}
+			for i := range n {
+				list.Projects = append(list.Projects, Project{
+					Path:         fmt.Sprintf("/p%d", i),
+					DataDir:      fmt.Sprintf("/p%d/.crush", i),
+					LastAccessed: time.Now().UTC(),
+				})
+			}
+			if err := Save(list); err != nil {
+				b.Fatal(err)
+			}
+
+			b.ResetTimer()
+			for b.Loop() {
+				_ = Register("/new-path-bench", "/new-path-bench/.crush")
+			}
+		})
 	}
 }

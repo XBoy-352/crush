@@ -13,6 +13,11 @@ import (
 
 const projectsFileName = "projects.json"
 
+// MaxEntries is the maximum number of projects kept in the JSON file.
+// When Register would exceed this limit, the least recently accessed
+// entries are evicted (LRU by LastAccessed).
+const MaxEntries = 2000
+
 // Project represents a tracked project directory.
 type Project struct {
 	Path         string    `json:"path"`
@@ -106,6 +111,10 @@ func Register(workingDir, dataDir string) error {
 	slices.SortStableFunc(list.Projects, func(a, b Project) int {
 		return b.LastAccessed.Compare(a.LastAccessed)
 	})
+
+	if len(list.Projects) > MaxEntries {
+		list.Projects = list.Projects[:MaxEntries]
+	}
 
 	return Save(list)
 }
