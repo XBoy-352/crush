@@ -113,7 +113,16 @@ func Register(workingDir, dataDir string) error {
 	})
 
 	if len(list.Projects) > MaxEntries {
-		list.Projects = list.Projects[:MaxEntries]
+		// Evict the least recently accessed entries -- but never the one just
+		// registered. A store dated ahead of the local clock (skew, an NTP step
+		// back, a file copied from a machine whose clock ran fast) sorts the new
+		// entry to the tail, and truncating blindly would drop it on every run,
+		// leaving the current project permanently absent from `crush projects`.
+		kept := list.Projects[:MaxEntries]
+		if !slices.ContainsFunc(kept, func(p Project) bool { return p.Path == workingDir }) {
+			kept[MaxEntries-1] = entry
+		}
+		list.Projects = kept
 	}
 
 	return Save(list)

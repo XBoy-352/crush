@@ -377,3 +377,47 @@ func TestRegisterKeepsTiedGroupOrderFromUnsortedStore(t *testing.T) {
 		t.Errorf("tied groups reordered:\n got %v\nwant %v", got, want)
 	}
 }
+
+func TestRegisterCapNeverEvictsJustRegistered(t *testing.T) {
+	// The store is already at MaxEntries and its entries are dated ahead of the
+	// local clock -- clock skew, an NTP step back, or a projects.json copied
+	// from a machine whose clock ran fast. The just-registered entry then sorts
+	// to the tail, and a blind truncation would drop it on every single run,
+	// so the current project would never appear in `crush projects` again.
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", tmpDir)
+	t.Setenv("CRUSH_GLOBAL_DATA", filepath.Join(tmpDir, "crush"))
+
+	now := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	orig := timeNow
+	timeNow = func() time.Time { return now }
+	t.Cleanup(func() { timeNow = orig })
+
+	future := now.Add(time.Hour)
+	list := &ProjectList{}
+	for i := range MaxEntries {
+		list.Projects = append(list.Projects, Project{
+			Path:         fmt.Sprintf("/old%d", i),
+			DataDir:      fmt.Sprintf("/old%d/.crush", i),
+			LastAccessed: future,
+		})
+	}
+	if err := Save(list); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	if err := Register("/current-project", "/current-project/.crush"); err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+
+	projects, err := List()
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+	if n := len(projects); n != MaxEntries {
+		t.Errorf("got %d projects, want exactly %d", n, MaxEntries)
+	}
+	if !slices.ContainsFunc(projects, func(p Project) bool { return p.Path == "/current-project" }) {
+		t.Error("Register dropped the project it was asked to register")
+	}
+}
