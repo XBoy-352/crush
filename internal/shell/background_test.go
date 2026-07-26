@@ -328,3 +328,117 @@ func TestBackgroundShell_WaitContext_Canceled(t *testing.T) {
 
 	require.False(t, bgShell.WaitContext(ctx))
 }
+
+func TestSyncBufferUnderCap(t *testing.T) {
+	t.Parallel()
+	sb := &syncBuffer{headLimit: 64, tailLimit: 64}
+	input := []byte("hello world")
+	n, err := sb.Write(input)
+	require.NoError(t, err)
+	require.Equal(t, len(input), n)
+	require.Equal(t, string(input), sb.String())
+	require.False(t, sb.truncated)
+}
+
+func TestSyncBufferExactBoundary(t *testing.T) {
+	t.Parallel()
+	sb := &syncBuffer{headLimit: 8, tailLimit: 8}
+	input := []byte("HEADHEADTAILTAIL") // 16 bytes
+	n, err := sb.Write(input)
+	require.NoError(t, err)
+	require.Equal(t, len(input), n)
+	require.Equal(t, string(input), sb.String())
+	require.NotContains(t, sb.String(), "truncated")
+}
+
+func TestSyncBufferOverCapSingleWrite(t *testing.T) {
+	t.Parallel()
+	const head, tail = 32, 32
+	sb := &syncBuffer{headLimit: head, tailLimit: tail}
+	// 200 bytes: first 32 head, last 32 tail, middle truncated
+	input := make([]byte, 200)
+	for i := range input {
+		input[i] = byte('A' + i%26)
+	}
+	// mark head/tail regions uniquely
+	copy(input[:4], []byte("HEAD"))
+	copy(input[len(input)-4:], []byte("TAIL"))
+
+	n, err := sb.Write(input)
+	require.NoError(t, err)
+	require.Equal(t, len(input), n)
+
+	out := sb.String()
+	require.True(t, strings.HasPrefix(out, string(input[:head])))
+	require.True(t, strings.HasSuffix(out, string(input[len(input)-tail:])))
+	require.Contains(t, out, "bytes truncated")
+	require.LessOrEqual(t, len(out), head+tail+80)
+	require.True(t, sb.truncated)
+}
+
+func TestSyncBufferManySmallWrites(t *testing.T) {
+	t.Parallel()
+	const head, tail = 64, 64
+	sb := &syncBuffer{headLimit: head, tailLimit: tail}
+	var full []byte
+	for i := range 300 {
+		chunk := []byte{byte('a' + i%26)}
+		full = append(full, chunk...)
+		n, err := sb.Write(chunk)
+		require.NoError(t, err)
+		require.Equal(t, 1, n)
+	}
+	out := sb.String()
+	require.True(t, strings.HasPrefix(out, string(full[:head])))
+	require.True(t, strings.HasSuffix(out, string(full[len(full)-tail:])))
+	require.Contains(t, out, "bytes truncated")
+	require.LessOrEqual(t, len(out), head+tail+80)
+}
+
+func TestSyncBufferWriteString(t *testing.T) {
+	t.Parallel()
+	sb := &syncBuffer{headLimit: 8, tailLimit: 8}
+	n, err := sb.WriteString("abcdefghijklmnopqr") // 18
+	require.NoError(t, err)
+	require.Equal(t, 18, n)
+	out := sb.String()
+	require.True(t, strings.HasPrefix(out, "abcdefgh"))
+	require.True(t, strings.HasSuffix(out, "ijklmnopqr"[len("ijklmnopqr")-8:]))
+	require.Contains(t, out, "bytes truncated")
+}
+
+func TestSyncBufferHeapBounded(t *testing.T) {
+	t.Parallel()
+	sb := newSyncBuffer()  // 1 MiB + 1 MiB
+	const total = 32 << 20 // 32 MiB
+	const chunk = 64 << 10
+	payload := make([]byte, chunk)
+	for i := range payload {
+		payload[i] = 'x'
+	}
+
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	written := 0
+	for written < total {
+		n, err := sb.Write(payload)
+		require.NoError(t, err)
+		require.Equal(t, len(payload), n)
+		written += n
+	}
+
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+
+	out := sb.String()
+	require.Contains(t, out, "bytes truncated")
+	// Retained payload is ~2 MiB; allow generous overhead under GC noise.
+	growth := int64(after.HeapAlloc) - int64(before.HeapAlloc)
+	if growth < 0 {
+		growth = 0
+	}
+	require.Less(t, growth, int64(8<<20), "heap grew by %d bytes after writing %d", growth, total)
+	require.LessOrEqual(t, len(out), defaultSyncBufferHeadBytes+defaultSyncBufferTailBytes+128)
+}

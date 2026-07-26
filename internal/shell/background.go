@@ -1,10 +1,10 @@
 package shell
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,30 +17,108 @@ const (
 	MaxBackgroundJobs = 50
 	// CompletedJobRetentionMinutes is how long to keep completed jobs before auto-cleanup (8 hours)
 	CompletedJobRetentionMinutes = 8 * 60
+
+	defaultSyncBufferHeadBytes = 1 << 20 // 1 MiB
+	defaultSyncBufferTailBytes = 1 << 20 // 1 MiB
 )
 
-// syncBuffer is a thread-safe wrapper around bytes.Buffer.
+// syncBuffer is a thread-safe output buffer that retains a fixed head and a
+// rolling tail once the stream exceeds head+tail bytes. A single large Write
+// never retains more than head+tail bytes of payload.
 type syncBuffer struct {
-	buf bytes.Buffer
-	mu  sync.RWMutex
+	mu        sync.RWMutex
+	headLimit int
+	tailLimit int
+	head      []byte
+	tail      []byte
+	total     int64
+	truncated bool
+}
+
+func newSyncBuffer() *syncBuffer {
+	return &syncBuffer{
+		headLimit: defaultSyncBufferHeadBytes,
+		tailLimit: defaultSyncBufferTailBytes,
+	}
 }
 
 func (sb *syncBuffer) Write(p []byte) (n int, err error) {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
-	return sb.buf.Write(p)
+	sb.writeLocked(p)
+	return len(p), nil
 }
 
 func (sb *syncBuffer) WriteString(s string) (n int, err error) {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
-	return sb.buf.WriteString(s)
+	sb.writeLocked([]byte(s))
+	return len(s), nil
+}
+
+func (sb *syncBuffer) writeLocked(p []byte) {
+	if len(p) == 0 {
+		return
+	}
+	sb.total += int64(len(p))
+
+	if len(sb.head) < sb.headLimit {
+		need := sb.headLimit - len(sb.head)
+		if len(p) <= need {
+			sb.head = append(sb.head, p...)
+			return
+		}
+		sb.head = append(sb.head, p[:need]...)
+		p = p[need:]
+	}
+	if len(p) == 0 {
+		return
+	}
+
+	// Keep only the last tailLimit bytes of everything past the head.
+	// Never allocate more than tailLimit for the incoming slice.
+	if len(p) >= sb.tailLimit {
+		// Prior tail content (if any) is fully superseded by this write.
+		if len(sb.tail) > 0 {
+			sb.truncated = true
+		}
+		sb.tail = append(sb.tail[:0], p[len(p)-sb.tailLimit:]...)
+	} else {
+		sb.tail = append(sb.tail, p...)
+		if len(sb.tail) > sb.tailLimit {
+			sb.tail = append([]byte(nil), sb.tail[len(sb.tail)-sb.tailLimit:]...)
+			sb.truncated = true
+		}
+	}
+	// Marker only when the retained window is smaller than total written.
+	if sb.total > int64(len(sb.head)+len(sb.tail)) {
+		sb.truncated = true
+	}
 }
 
 func (sb *syncBuffer) String() string {
 	sb.mu.RLock()
 	defer sb.mu.RUnlock()
-	return sb.buf.String()
+	if !sb.truncated {
+		if len(sb.tail) == 0 {
+			return string(sb.head)
+		}
+		var b strings.Builder
+		b.Grow(len(sb.head) + len(sb.tail))
+		b.Write(sb.head)
+		b.Write(sb.tail)
+		return b.String()
+	}
+	omitted := sb.total - int64(len(sb.head)) - int64(len(sb.tail))
+	if omitted < 0 {
+		omitted = 0
+	}
+	var b strings.Builder
+	b.Grow(len(sb.head) + len(sb.tail) + 64)
+	b.Write(sb.head)
+	fmt.Fprintf(&b, "\n\n... [%d bytes truncated] ...\n\n", omitted)
+	b.Write(sb.tail)
+	return b.String()
 }
 
 // BackgroundShell represents a shell running in the background.
@@ -109,8 +187,8 @@ func (m *BackgroundShellManager) Start(ctx context.Context, workingDir string, b
 		Shell:       shell,
 		ctx:         shellCtx,
 		cancel:      cancel,
-		stdout:      &syncBuffer{},
-		stderr:      &syncBuffer{},
+		stdout:      newSyncBuffer(),
+		stderr:      newSyncBuffer(),
 		done:        make(chan struct{}),
 	}
 
