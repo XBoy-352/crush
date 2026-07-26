@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/prompt"
@@ -22,17 +23,80 @@ var workflowToolDescription string
 // WorkflowToolName is the name of the workflow tool.
 const WorkflowToolName = "workflow"
 
+// Sub-agent profile names accepted by the Lua API. These must stay in sync
+// with workflow.ValidAgentProfiles, which is what validates script input.
+const (
+	workflowProfileTask  = "task"
+	workflowProfileCoder = "coder"
+)
+
 // WorkflowParams is the parameters for the workflow tool.
 type WorkflowParams struct {
 	Description string `json:"description" description:"One-line summary of what this workflow does; shown in the permission prompt"`
 	Script      string `json:"script" description:"Lua orchestration script; see tool description for the API"`
 }
 
-// workflowAgents holds pre-built agents for each profile so that
-// spawn can pick the right one without re-creating them per call.
+// workflowAgentKey identifies one sub-agent variant: a profile ("task" or
+// "coder") paired with the model a spawn asked for ("large", "small", or ""
+// meaning inherit whatever the profile's config selects).
+type workflowAgentKey struct {
+	profile string
+	model   string
+}
+
+// workflowSpawnKey maps one spawn's options to the sub-agent variant it needs.
+// An empty profile defaults to "task"; an empty model inherits whatever that
+// profile's config selects. Both are documented Lua API defaults, and the engine
+// has already rejected values outside workflow.ValidAgentProfiles/ValidModels.
+func workflowSpawnKey(opts workflow.SpawnOpts) workflowAgentKey {
+	profile := opts.Agent
+	if profile == "" {
+		profile = workflowProfileTask
+	}
+	return workflowAgentKey{profile: profile, model: opts.Model}
+}
+
+// workflowAgents builds sub-agents on first use and caches them, so every
+// spawn of a given kind shares one agent.
+//
+// Lazily rather than up front: buildTools runs on every prompt submit
+// (coordinator.go), so eagerly constructing all four profile/model
+// combinations would add provider setup to the latency of each message.
+// Scripts that never ask for the small model pay exactly what they did before.
 type workflowAgents struct {
-	task  SessionAgent
-	coder SessionAgent
+	build func(key workflowAgentKey) (SessionAgent, error)
+
+	mu    sync.Mutex
+	cache map[workflowAgentKey]SessionAgent
+}
+
+// get returns the agent for key, building it if this is its first use.
+// The build call deliberately happens outside the lock: agents are only ever
+// added, so a concurrent duplicate build is wasteful but harmless, whereas
+// holding a mutex across agent construction would serialise every spawn in a
+// parallel batch behind the first one.
+func (w *workflowAgents) get(key workflowAgentKey) (SessionAgent, error) {
+	w.mu.Lock()
+	cached, ok := w.cache[key]
+	w.mu.Unlock()
+	if ok {
+		return cached, nil
+	}
+
+	built, err := w.build(key)
+	if err != nil {
+		return nil, err
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	// Another spawn may have won the race; keep whichever landed first so all
+	// spawns of this kind share one agent.
+	if cached, ok := w.cache[key]; ok {
+		return cached, nil
+	}
+	w.cache[key] = built
+	return built, nil
 }
 
 // stripWorkflowTool returns a copy of the agent config with the
@@ -46,7 +110,10 @@ func stripWorkflowTool(agent config.Agent) config.Agent {
 	return agent
 }
 
-func (c *coordinator) workflowTool(ctx context.Context) (fantasy.AgentTool, error) {
+// newWorkflowAgents prepares the sub-agent factory for one workflow tool: both
+// profile configs with the workflow tool stripped, both system prompts, and the
+// lazy per-(profile, model) cache that spawn resolves against.
+func (c *coordinator) newWorkflowAgents(ctx context.Context) (*workflowAgents, error) {
 	// Build agents for both profiles, stripping the workflow tool
 	// from each to prevent recursive fan-out (safety 3a).
 	taskCfg, ok := c.cfg.Config().Agents[config.AgentTask]
@@ -75,19 +142,39 @@ func (c *coordinator) workflowTool(ctx context.Context) (fantasy.AgentTool, erro
 		return nil, fmt.Errorf("failed to build coder prompt: %w", err)
 	}
 
-	taskAgent, err := c.buildAgent(ctx, taskPrmpt, taskCfg, true)
-	if err != nil {
-		return nil, fmt.Errorf("failed to build task agent: %w", err)
+	agents := &workflowAgents{
+		cache: make(map[workflowAgentKey]SessionAgent),
+		build: func(key workflowAgentKey) (SessionAgent, error) {
+			cfg, prmpt := taskCfg, taskPrmpt
+			if key.profile == workflowProfileCoder {
+				cfg, prmpt = coderCfg, coderPrmpt
+			}
+
+			// An empty model leaves the profile's configured selection alone,
+			// which is what the Lua API documents as the default. The engine
+			// has already rejected anything outside workflow.ValidModels.
+			switch key.model {
+			case "large":
+				cfg.Model = config.SelectedModelTypeLarge
+			case "small":
+				cfg.Model = config.SelectedModelTypeSmall
+			}
+
+			agent, err := c.buildAgent(ctx, prmpt, cfg, true)
+			if err != nil {
+				return nil, fmt.Errorf("failed to build %s sub-agent: %w", key.profile, err)
+			}
+			return agent, nil
+		},
 	}
 
-	coderAgent, err := c.buildAgent(ctx, coderPrmpt, coderCfg, true)
-	if err != nil {
-		return nil, fmt.Errorf("failed to build coder agent: %w", err)
-	}
+	return agents, nil
+}
 
-	agents := workflowAgents{
-		task:  taskAgent,
-		coder: coderAgent,
+func (c *coordinator) workflowTool(ctx context.Context) (fantasy.AgentTool, error) {
+	agents, err := c.newWorkflowAgents(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	return fantasy.NewAgentTool(
@@ -144,11 +231,10 @@ func (c *coordinator) workflowTool(ctx context.Context) (fantasy.AgentTool, erro
 					title = fmt.Sprintf("Workflow Agent %d", index+1)
 				}
 
-				// Select the agent based on the requested profile.
-				// Empty defaults to "task" to preserve existing behaviour.
-				agent := agents.task
-				if opts.Agent == "coder" {
-					agent = agents.coder
+				// Select the agent by requested profile AND model.
+				agent, err := agents.get(workflowSpawnKey(opts))
+				if err != nil {
+					return "", err
 				}
 
 				subParams := subAgentParams{
@@ -165,7 +251,7 @@ func (c *coordinator) workflowTool(ctx context.Context) (fantasy.AgentTool, erro
 				// (the single workflow permission covers them).
 				// Task-profile subagents are read-only and don't
 				// need auto-approval.
-				if opts.Agent == "coder" {
+				if opts.Agent == workflowProfileCoder {
 					subParams.SessionSetup = func(id string) {
 						c.permissions.AutoApproveSession(id)
 					}
