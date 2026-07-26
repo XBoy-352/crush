@@ -9,8 +9,10 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/lock"
 )
 
 //go:embed memory.md
@@ -84,6 +86,14 @@ func NewMemoryTool(dataDir string) fantasy.AgentTool {
 					return fantasy.ToolResponse{}, fmt.Errorf("create memory directory: %w", err)
 				}
 
+				// Lock around the entire read-check-write-index cycle so
+				// concurrent writers do not observe or produce a stale index.
+				release, err := lockMemoryDir(ctx, dataDir)
+				if err != nil {
+					return fantasy.ToolResponse{}, fmt.Errorf("acquire memory lock: %w", err)
+				}
+				defer release()
+
 				if _, err := os.Stat(path); os.IsNotExist(err) {
 					count, err := countMemoryFiles(memoryDir)
 					if err != nil {
@@ -104,7 +114,7 @@ func NewMemoryTool(dataDir string) fantasy.AgentTool {
 				}
 
 				body := formatMemoryFile(params.Description, params.Content)
-				if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+				if err := atomicWriteFile(path, []byte(body), 0o644); err != nil {
 					return fantasy.ToolResponse{}, fmt.Errorf("write memory file: %w", err)
 				}
 
@@ -116,7 +126,7 @@ func NewMemoryTool(dataDir string) fantasy.AgentTool {
 					// The prompt layer would truncate this entry away, so the
 					// save would silently do nothing. Undo it and say so.
 					if hadPrev {
-						err = os.WriteFile(path, prev, 0o644)
+						err = atomicWriteFile(path, prev, 0o644)
 					} else {
 						err = os.Remove(path)
 					}
@@ -142,6 +152,13 @@ func NewMemoryTool(dataDir string) fantasy.AgentTool {
 				)), nil
 
 			case "delete":
+				// Lock so concurrent writers don't regenerate a stale index.
+				release, err := lockMemoryDir(ctx, dataDir)
+				if err != nil {
+					return fantasy.ToolResponse{}, fmt.Errorf("acquire memory lock: %w", err)
+				}
+				defer release()
+
 				if err := os.Remove(path); err != nil {
 					if os.IsNotExist(err) {
 						return fantasy.NewTextErrorResponse(fmt.Sprintf("no memory named %s", params.Name)), nil
@@ -201,7 +218,7 @@ func writeMemoryIndex(memoryDir, index string) error {
 	if index == "" {
 		return nil
 	}
-	return os.WriteFile(filepath.Join(memoryDir, memoryIndexFileName), []byte(index), 0o644)
+	return atomicWriteFile(filepath.Join(memoryDir, memoryIndexFileName), []byte(index), 0o644)
 }
 
 // renderMemoryIndex builds the MEMORY.md body from a directory scan without
@@ -273,4 +290,41 @@ func extractMemoryDescription(content, slug string) string {
 		}
 	}
 	return slug
+}
+
+// lockMemoryDir acquires an exclusive file lock for the memory directory.
+// The lock file lives in dataDir so it does not depend on the memory
+// subdirectory itself existing. Use a short timeout so a stuck writer
+// does not hang the tool forever.
+func lockMemoryDir(ctx context.Context, dataDir string) (func(), error) {
+	lockPath := filepath.Join(dataDir, "memory-write.lock")
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return lock.File(ctx, lockPath)
+}
+
+// atomicWriteFile writes data to path atomically by writing to a temporary
+// file in the same directory and renaming it into place.
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Chmod(perm); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, path)
 }

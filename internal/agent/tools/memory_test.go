@@ -316,3 +316,78 @@ func TestMemoryWriteInvalidAction(t *testing.T) {
 	require.True(t, resp.IsError)
 	require.Contains(t, resp.Content, "action must be save or delete")
 }
+
+// Two concurrent writers must not lose an entry.
+func TestMemoryWriteConcurrent(t *testing.T) {
+	dataDir := t.TempDir()
+	memoryDir := filepath.Join(dataDir, "memory")
+
+	const writers = 10
+	names := make([]string, writers)
+	for i := range writers {
+		names[i] = fmt.Sprintf("mem-%03d", i)
+	}
+
+	type result struct {
+		name string
+		err  error
+	}
+	results := make(chan result, writers)
+
+	// Use a stand-alone runner so we don't call t.Helper / require from
+	// goroutines.
+	run := func(dataDir string, params MemoryWriteParams) error {
+		tool := NewMemoryTool(dataDir)
+		input, jErr := json.Marshal(params)
+		if jErr != nil {
+			return jErr
+		}
+		resp, tErr := tool.Run(context.Background(), fantasy.ToolCall{
+			ID:    "test-call",
+			Name:  MemoryWriteToolName,
+			Input: string(input),
+		})
+		if tErr != nil {
+			return tErr
+		}
+		if resp.IsError {
+			return fmt.Errorf("tool error: %s", resp.Content)
+		}
+		return nil
+	}
+
+	for _, name := range names {
+		name := name
+		go func() {
+			err := run(dataDir, MemoryWriteParams{
+				Action:      "save",
+				Name:        name,
+				Description: "entry " + name,
+				Content:     "body for " + name,
+			})
+			results <- result{name: name, err: err}
+		}()
+	}
+
+	for range writers {
+		r := <-results
+		require.NoError(t, r.err, "save %s", r.name)
+	}
+
+	// All 10 files exist on disk.
+	for _, name := range names {
+		_, err := os.Stat(filepath.Join(memoryDir, name+".md"))
+		require.NoError(t, err, "missing file for %s", name)
+	}
+
+	// All 10 entries appear in MEMORY.md.
+	index, err := os.ReadFile(filepath.Join(memoryDir, memoryIndexFileName))
+	require.NoError(t, err)
+	for _, name := range names {
+		require.Contains(t, string(index), "- "+name+":", "missing %s in index", name)
+	}
+
+	// No stray entries in index.
+	count := strings.Count(string(index), "\n- ")
+	require.Equal(t, writers, count, "index has %d entries, expected %d", count, writers)
+}

@@ -1861,6 +1861,15 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		m.dialog.CloseDialog(dialog.SessionsID)
 		cmds = append(cmds, m.loadSession(msg.Session.ID))
 
+	// Memory dialog messages.
+	case dialog.ActionOpenMemory:
+		m.dialog.CloseDialog(dialog.MemoryID)
+		path := filepath.Join(m.com.Config().Options.DataDirectory, "memory", msg.Slug+".md")
+		cmds = append(cmds, m.openMemoryFileEditor(path))
+	case dialog.ActionDeleteMemory:
+		m.dialog.CloseDialog(dialog.MemoryID)
+		cmds = append(cmds, util.ReportInfo(fmt.Sprintf("Deleted memory %q.", msg.Slug)))
+
 	// Open dialog message.
 	case dialog.ActionOpenDialog:
 		m.dialog.CloseDialog(dialog.CommandsID)
@@ -3709,6 +3718,28 @@ func (m *UI) openEditor(value string) tea.Cmd {
 	})
 }
 
+// openMemoryFileEditor opens a memory file in the external editor.
+func (m *UI) openMemoryFileEditor(path string) tea.Cmd {
+	cmd, err := editor.Command("crush", path)
+	if err != nil {
+		return util.ReportError(fmt.Errorf("editor: %w", err))
+	}
+	return tea.ExecProcess(
+		cmd,
+		func(err error) tea.Msg {
+			if err != nil {
+				return util.ReportError(fmt.Errorf("editor: %w", err))
+			}
+			content, err := os.ReadFile(path)
+			if err != nil {
+				return util.ReportError(err)
+			}
+			m.textarea.SetValue(string(content))
+			return nil
+		},
+	)
+}
+
 // setEditorPrompt configures the textarea prompt function. Priority is
 // bang > plan > yolo > normal. The yolo argument is the cached skip-requests
 // flag so View/Update paths never probe the workspace synchronously.
@@ -4329,6 +4360,10 @@ func (m *UI) openDialog(id string) tea.Cmd {
 		if cmd := m.openBtwDialog(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+	case dialog.MemoryID:
+		if cmd := m.openMemoryDialog(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	default:
 		// Unknown dialog
 		break
@@ -4347,6 +4382,21 @@ func (m *UI) openBtwDialog() tea.Cmd {
 	}
 	btwDialog := dialog.NewBtw(m.com, m.session.ID)
 	m.dialog.OpenDialog(btwDialog)
+	return nil
+}
+
+// openMemoryDialog opens the memory inspect dialog.
+func (m *UI) openMemoryDialog() tea.Cmd {
+	if m.dialog.ContainsDialog(dialog.MemoryID) {
+		m.dialog.BringToFront(dialog.MemoryID)
+		return nil
+	}
+
+	memDialog, err := dialog.NewMemory(m.com)
+	if err != nil {
+		return util.ReportError(err)
+	}
+	m.dialog.OpenDialog(memDialog)
 	return nil
 }
 
