@@ -99,7 +99,7 @@ return items
 - **Max Agents**: 100 agents per workflow.
 - **Max Concurrent**: 5 agents running concurrently (1 when any `parallel()` entry uses `agent = "coder"` — see below).
 - **Max Script Size**: 64 KiB.
-- **Timeout**: 5 minutes wall-clock per workflow.
+- **Timeout**: 30 minutes wall-clock per workflow.
 - **No nested workflows**: subagents cannot call the `workflow` tool themselves, regardless of profile.
 - **Coder batches serialise**: if any entry in a `parallel()` batch requests `agent = "coder"`, that batch runs at concurrency 1 to prevent concurrent writers from corrupting files in the shared working tree. Future work: worktree isolation would remove this restriction.
 - Prefer one `parallel` round per stage. Put data transforms between rounds in plain Lua.
