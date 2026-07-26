@@ -70,7 +70,7 @@ func NewJobs(com *common.Common) (*Jobs, error) {
 
 	j.keyMap.Select = key.NewBinding(
 		key.WithKeys("enter", "ctrl+y"),
-		key.WithHelp("enter", "choose"),
+		key.WithHelp("enter", "kill"),
 	)
 	j.keyMap.Next = key.NewBinding(
 		key.WithKeys("down", "ctrl+n"),
@@ -147,11 +147,14 @@ func (j *Jobs) HandleMsg(msg tea.Msg) Action {
 				}
 				j.list.ScrollToSelected()
 			case key.Matches(msg, j.keyMap.Select):
-				if item := j.list.SelectedItem(); item != nil {
-					if ji, ok := item.(*JobItem); ok {
-						return ActionKillJob{ShellID: ji.job.ID}
-					}
+				// Killing a job is destructive and irreversible, so enter
+				// asks first exactly like ctrl+x rather than terminating
+				// the highlighted job outright.
+				if j.selectedJob() == nil {
+					return ActionCmd{Cmd: util.ReportWarn("No job selected")}
 				}
+				j.mode = jobsModeKilling
+				j.refresh()
 			default:
 				var cmd tea.Cmd
 				j.input, cmd = j.input.Update(msg)
