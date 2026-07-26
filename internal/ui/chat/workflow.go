@@ -93,20 +93,18 @@ func (w *WorkflowToolMessageItem) AddNestedTool(tool ToolMessageItem) {
 }
 
 // SetProgress updates live progress state for the workflow.
-func (w *WorkflowToolMessageItem) SetProgress(running, completed, total int, kind, label, msg string) {
+func (w *WorkflowToolMessageItem) SetProgress(running, completed, total, index int, kind, label, msg string) {
 	w.running = running
 	w.completed = completed
 	w.total = total
 	if kind == "log" && msg != "" {
 		w.lastLog = msg
 	}
-	if kind == "agent_start" && label != "" {
+	if kind == "agent_start" && label != "" && index >= 0 {
 		if w.labels == nil {
 			w.labels = make(map[int]string)
 		}
-		// Use the agent index from the progress; total is the latest agentIndex
-		// so the label's index is total-1 on start (agentIndex was already bumped).
-		w.labels[w.running+w.completed-1] = label
+		w.labels[index] = label
 	}
 	w.clearCache()
 	w.Bump()

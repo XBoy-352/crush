@@ -4696,7 +4696,7 @@ func (m *UI) handleWorkflowProgress(wp *notify.WorkflowProgress) tea.Cmd {
 	if !ok {
 		return nil
 	}
-	wf.SetProgress(wp.Running, wp.Completed, wp.Total, wp.Kind, wp.Label, wp.Message)
+	wf.SetProgress(wp.Running, wp.Completed, wp.Total, wp.Index, wp.Kind, wp.Label, wp.Message)
 	return nil
 }
 
