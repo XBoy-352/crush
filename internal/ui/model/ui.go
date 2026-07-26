@@ -2513,13 +2513,21 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 	// Only intercept when something is actually waiting; otherwise leave
 	// ctrl+b for the textarea (character-backward) while the user typing.
 	// When the fgWait cache is stale (the ~500ms window after bash starts)
-	// we probe directly to avoid falling through to the textarea.
+	// probe directly so we neither miss a real wait nor steal ctrl+b when
+	// nothing is backgroundable.
 	if key.Matches(msg, m.keyMap.Chat.Background) {
-		if m.isAgentBusy() && (m.hasForegroundWaitsCached() || !m.fgWaitCache.fresh(busyCacheTTL)) {
-			if cmd := m.backgroundForegroundTools(); cmd != nil {
-				cmds = append(cmds, cmd)
+		if m.isAgentBusy() {
+			hasWaits := m.hasForegroundWaitsCached()
+			if !hasWaits && !m.fgWaitCache.fresh(busyCacheTTL) && m.hasSession() && m.com != nil && m.com.Workspace != nil {
+				hasWaits = m.com.Workspace.AgentHasForegroundWaits(m.session.ID)
+				m.fgWaitCache.set(hasWaits)
 			}
-			return tea.Batch(cmds...)
+			if hasWaits {
+				if cmd := m.backgroundForegroundTools(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+				return tea.Batch(cmds...)
+			}
 		}
 	}
 
