@@ -410,7 +410,8 @@ func TestSyncBufferWriteString(t *testing.T) {
 }
 
 func TestSyncBufferHeapBounded(t *testing.T) {
-	t.Parallel()
+	// No t.Parallel: this reads process-global runtime.MemStats, so any other
+	// test allocating concurrently lands inside the measurement window.
 	sb := newSyncBuffer()  // 1 MiB + 1 MiB
 	const total = 32 << 20 // 32 MiB
 	const chunk = 64 << 10
@@ -436,6 +437,14 @@ func TestSyncBufferHeapBounded(t *testing.T) {
 
 	out := sb.String()
 	require.Contains(t, out, "bytes truncated")
+
+	// The deterministic invariant: whatever the process heap did, the buffer
+	// itself retains at most head+tail regardless of how much was written.
+	require.LessOrEqual(t, len(sb.head), defaultSyncBufferHeadBytes)
+	require.LessOrEqual(t, sb.tailLen, defaultSyncBufferTailBytes)
+	require.LessOrEqual(t, cap(sb.tail), defaultSyncBufferTailBytes)
+	require.Equal(t, int64(total), sb.total)
+
 	// Retained payload is ~2 MiB; allow generous overhead under GC noise.
 	growth := int64(after.HeapAlloc) - int64(before.HeapAlloc)
 	if growth < 0 {
@@ -471,7 +480,8 @@ func TestSyncBufferTailWritesDoNotAllocate(t *testing.T) {
 // and the tail content actually survive (a one-sided length bound would also
 // pass on an empty buffer).
 func TestSyncBufferSteadyStateDoesNotCreep(t *testing.T) {
-	t.Parallel()
+	// No t.Parallel: this allocates heavily and would otherwise land inside
+	// TestSyncBufferHeapBounded's process-global MemStats window.
 	const head, tail = 64, 64
 	sb := &syncBuffer{headLimit: head, tailLimit: tail}
 	first := strings.Repeat("H", head)
