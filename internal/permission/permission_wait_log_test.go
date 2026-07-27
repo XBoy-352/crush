@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -82,10 +83,14 @@ func TestRequestLogsWhileWaiting(t *testing.T) {
 		t.Fatal("permission request was never published")
 	}
 
-	require.Eventually(t, func() bool {
-		return strings.Contains(logs.String(), "still unanswered")
-	}, 3*time.Second, 10*time.Millisecond,
-		"a permission left unanswered must be logged; got:\n%s", logs.String())
+	// EventuallyWithT, not Eventually: msgAndArgs to Eventually are evaluated at
+	// call time, so a `logs.String()` passed there is always the empty buffer
+	// from before the wait and the failure tells you nothing. The CollectT body
+	// re-reads the buffer on the final attempt.
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Contains(c, logs.String(),
+			"still unanswered", "a permission left unanswered must be logged")
+	}, 3*time.Second, 10*time.Millisecond)
 
 	out := logs.String()
 	require.Contains(t, out, "Permission requested; waiting for the user")
@@ -162,10 +167,10 @@ func TestQueuedRequestIsLogged(t *testing.T) {
 		second <- granted
 	}()
 
-	require.Eventually(t, func() bool {
-		return strings.Contains(logs.String(), "queued behind an unanswered prompt")
-	}, 3*time.Second, 10*time.Millisecond,
-		"a request blocked behind an unanswered prompt must be logged; got:\n%s", logs.String())
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Contains(c, logs.String(), "queued behind an unanswered prompt",
+			"a request blocked behind an unanswered prompt must be logged")
+	}, 3*time.Second, 10*time.Millisecond)
 
 	// Nothing else should have been published while the first is pending.
 	select {
