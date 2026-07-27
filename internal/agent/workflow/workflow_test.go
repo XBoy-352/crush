@@ -616,7 +616,7 @@ func TestWorkflowRun_ProgressEvents(t *testing.T) {
 	//   agent("c") start     → kind=agent_start, running=1, completed=2, total=3
 	//   agent("c") done      → kind=agent_done,  running=0, completed=3, total=3
 
-	require.GreaterOrEqual(t, len(events), 8, "should have at least 8 progress events")
+	require.Len(t, events, 8, "script emits exactly 8 progress events")
 
 	idx := 0
 	// event 0: log("starting")
