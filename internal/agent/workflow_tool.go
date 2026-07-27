@@ -202,14 +202,10 @@ func (c *coordinator) workflowTool(ctx context.Context) (fantasy.AgentTool, erro
 				return fantasy.ToolResponse{}, errors.New("message context missing")
 			}
 
-			// Safety 3c: count coder-profile agents in the script
-			// so the permission prompt can state what write
-			// capabilities are requested.
-			coderCount := countCoderAgents(params.Script)
-			desc := params.Description
-			if coderCount > 0 {
-				desc = fmt.Sprintf("%s [%d write-capable (coder) agent(s) requested]", desc, coderCount)
-			}
+			// Safety 3c: state the capability this approval grants.
+			// See workflowConsentNotice for why this is not derived
+			// from the script.
+			desc := workflowPermissionDescription(params.Description)
 
 			p, err := c.permissions.Request(ctx, permission.CreatePermissionRequest{
 				SessionID:   sessionID,
@@ -339,18 +335,33 @@ func (c *coordinator) workflowTool(ctx context.Context) (fantasy.AgentTool, erro
 	), nil
 }
 
-// countCoderAgents does a best-effort count of coder-profile agents
-// in a Lua script by looking for agent = "coder" patterns. This is
-// used to enrich the permission prompt (safety 3c).
-func countCoderAgents(script string) int {
-	count := 0
-	for _, pattern := range []string{
-		`agent = "coder"`,
-		`agent = 'coder'`,
-		`agent="coder"`,
-		`agent='coder'`,
-	} {
-		count += strings.Count(script, pattern)
+// workflowConsentNotice is appended to every workflow permission
+// prompt. It states the capability the approval grants rather than
+// anything about the script, because the script is a Turing-complete
+// Lua program and any claim derived from reading it can be made
+// false.
+//
+// This replaced a substring scan (countCoderAgents) that counted
+// `agent = "coder"` occurrences and reported the number to the user.
+// That count was wrong for ordinary Lua, not just for deliberate
+// evasion: `{agent  =  "coder"}` (two spaces), `{["agent"]="coder"}`,
+// and a newline between the key and the value all spawn a
+// write-capable sub-agent while the scan reports zero, so the user
+// could approve materially more than the prompt showed. The sentence
+// below is true for every script, including those five, so no script
+// can falsify it.
+//
+// The corresponding grant is the AutoApproveSession call in the spawn
+// closure above: a coder-profile sub-agent's session is auto-approved
+// for its lifetime, so its edit/write/bash calls never prompt again.
+const workflowConsentNotice = "Approving this workflow grants every sub-agent it starts file-write and shell access in this directory for the duration of the workflow, without prompting again for each action."
+
+// workflowPermissionDescription builds the text shown in the workflow
+// permission dialog: the model's own description of the workflow,
+// followed by the capability being granted.
+func workflowPermissionDescription(description string) string {
+	if description == "" {
+		return workflowConsentNotice
 	}
-	return count
+	return description + "\n\n" + workflowConsentNotice
 }

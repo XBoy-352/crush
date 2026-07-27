@@ -1,9 +1,16 @@
 package agent
 
 import (
+	"context"
+	"encoding/json"
+	"sync"
 	"testing"
 
+	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/permission"
+	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/stretchr/testify/require"
 )
 
@@ -59,33 +66,155 @@ func TestStripWorkflowTool_TaskProfile(t *testing.T) {
 		"task profile should be unchanged")
 }
 
-func TestCountCoderAgents(t *testing.T) {
+// recordingPermissions captures the permission request the workflow tool
+// sends and then denies it, so Run returns before any sub-agent is spawned.
+type recordingPermissions struct {
+	mu   sync.Mutex
+	seen bool
+	last permission.CreatePermissionRequest
+}
+
+func (r *recordingPermissions) Request(_ context.Context, opts permission.CreatePermissionRequest) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.seen = true
+	r.last = opts
+	return false, nil
+}
+
+// description returns the text the user would have been shown.
+func (r *recordingPermissions) description(t *testing.T) string {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	require.True(t, r.seen, "workflow tool never requested permission")
+	return r.last.Description
+}
+
+func (r *recordingPermissions) Subscribe(context.Context) <-chan pubsub.Event[permission.PermissionRequest] {
+	return nil
+}
+
+func (r *recordingPermissions) SubscribeNotifications(context.Context) <-chan pubsub.Event[permission.PermissionNotification] {
+	return nil
+}
+func (r *recordingPermissions) GrantPersistent(permission.PermissionRequest) bool { return true }
+func (r *recordingPermissions) Grant(permission.PermissionRequest) bool           { return true }
+func (r *recordingPermissions) Deny(permission.PermissionRequest) bool            { return true }
+func (r *recordingPermissions) AutoApproveSession(string)                         {}
+func (r *recordingPermissions) SetSkipRequests(bool)                              {}
+func (r *recordingPermissions) SkipRequests() bool                                { return false }
+func (r *recordingPermissions) SetPlanMode(bool)                                  {}
+func (r *recordingPermissions) PlanMode() bool                                    { return false }
+
+// workflowConsentFor runs the real workflow tool over a script and returns the
+// description string the permission dialog would render. It goes through
+// c.workflowTool -> tool.Run -> permissions.Request, so it exercises the
+// production call site rather than a copy of the text-building logic.
+func workflowConsentFor(t *testing.T, script string) string {
+	t.Helper()
+
+	c, _, _ := newModelPinningCoordinator(t)
+	rec := &recordingPermissions{}
+	c.permissions = rec
+
+	tool, err := c.workflowTool(t.Context())
+	require.NoError(t, err)
+
+	input, err := json.Marshal(WorkflowParams{
+		Description: workflowTestDescription,
+		Script:      script,
+	})
+	require.NoError(t, err)
+
+	ctx := context.WithValue(t.Context(), tools.SessionIDContextKey, "session-1")
+	ctx = context.WithValue(ctx, tools.MessageIDContextKey, "message-1")
+
+	_, err = tool.Run(ctx, fantasy.ToolCall{
+		ID:    "call-1",
+		Name:  WorkflowToolName,
+		Input: string(input),
+	})
+	require.NoError(t, err)
+
+	return rec.description(t)
+}
+
+// workflowTestDescription deliberately contains no digits, so a test can assert
+// mechanically that no count leaks back into the consent text.
+const workflowTestDescription = "Refactor the parser"
+
+// TestWorkflowConsentTextStatesCapability is the regression test for the
+// consent prompt being derived from a substring scan of a Turing-complete Lua
+// script. countCoderAgents looked for `agent = "coder"` and reported the number
+// of matches to the user; all five scripts below spawn a write-capable
+// sub-agent while that scan finds nothing, so the prompt claimed no coder agent
+// was requested and the user approved blanket file-write and shell access
+// anyway. Three of the five are ordinary Lua, not evasion.
+//
+// The fix states the capability the approval grants instead of describing the
+// script, so the text is necessarily invariant across every script. This test
+// asserts that invariance: all cases, bypasses and control alike, must produce
+// byte-identical consent text that names the capability.
+func TestWorkflowConsentTextStatesCapability(t *testing.T) {
 	t.Parallel()
+
 	cases := []struct {
 		name   string
 		script string
-		want   int
 	}{
-		{"none", `agent("hello")`, 0},
-		{"one double-quoted", `agent("do", {agent = "coder"})`, 1},
-		{"one single-quoted", `agent("do", {agent = 'coder'})`, 1},
-		{"two", `
-			parallel({
-				{prompt = "a", agent = "coder"},
-				{prompt = "b", agent = "coder"},
-			})
-		`, 2},
-		{"mixed", `
-			agent("read", {agent = "task"})
-			agent("write", {agent = "coder"})
-		`, 1},
-		{"no-space", `agent("x", {agent="coder"})`, 1},
+		// Bypass 1: the canonical form the old scan did match.
+		{"canonical", `agent("do", {agent = "coder"})`},
+		// Bypass 2: two spaces around `=`. Ordinary Lua; scan reported 0.
+		{"double space", `agent("do", {agent  =  "coder"})`},
+		// Bypass 3: bracketed key. Ordinary Lua; scan reported 0.
+		{"bracket key", `agent("do", {["agent"]="coder"})`},
+		// Bypass 4: newline before the value. Ordinary Lua; scan reported 0.
+		{"newline before value", "agent(\"do\", {agent =\n\t\"coder\"})"},
+		// Bypass 5: the profile name is computed at run time, so no
+		// static scan of the source can ever see it.
+		{"computed at runtime", `local p = "cod" .. "er"
+agent("do", {agent = p})`},
+		// Control: a script that really does spawn nothing writable.
+		// The capability statement is unconditional, so this must read
+		// exactly the same -- the user is told what approval grants,
+		// not what this particular script happens to do.
+		{"no coder at all", `agent("summarise the README")`},
 	}
+
+	var texts []string
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := countCoderAgents(tc.script)
-			require.Equal(t, tc.want, got)
+			desc := workflowConsentFor(t, tc.script)
+
+			require.Contains(t, desc, workflowConsentNotice,
+				"consent text must state the capability granted")
+			require.Contains(t, desc, "file-write",
+				"consent text must name file-write access")
+			require.Contains(t, desc, "shell",
+				"consent text must name shell access")
+			require.Contains(t, desc, workflowTestDescription,
+				"consent text must keep the workflow's own description")
+			require.NotRegexp(t, `\d`, desc,
+				"consent text must not report a count derived from the script")
+
+			texts = append(texts, desc)
 		})
 	}
+
+	for i := range texts {
+		require.Equal(t, texts[0], texts[i],
+			"consent text must be identical for every script; case %q differs", cases[i].name)
+	}
+}
+
+// TestWorkflowPermissionDescriptionAppendsNotice covers the text builder
+// directly, including the empty-description edge the tool itself rejects.
+func TestWorkflowPermissionDescriptionAppendsNotice(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "Do a thing\n\n"+workflowConsentNotice,
+		workflowPermissionDescription("Do a thing"))
+	require.Equal(t, workflowConsentNotice,
+		workflowPermissionDescription(""))
 }
