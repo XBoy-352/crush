@@ -3,9 +3,10 @@ package chat
 import (
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/ui/styles"
-	"github.com/stretchr/testify/require"
 )
 
 // spinningAssistantItem builds an assistant item in the spinning state:
