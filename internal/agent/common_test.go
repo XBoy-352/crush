@@ -185,13 +185,14 @@ func coderAgent(r *vcr.Recorder, env fakeEnv, large, small fantasy.LanguageModel
 	return testSessionAgent(env, large, small, systemPrompt, allTools...), nil
 }
 
-// pinLsLimits forces the ls tool's caps back to the values they take inside a
-// git worktree (unset, i.e. 0 == "no cap"). config.Init assigns MaxDepth=2 and
-// MaxItems=100 when the process cwd is NOT inside a worktree
-// (internal/config/load.go), which makes ls append a depth notice to its
-// output. That notice lands in the request body, and charm.land/x/vcr matches
-// on body only, so every TestCoderAgent cassette misses. Pinning here keeps the
-// recorded bodies reproducible regardless of how the tree was obtained.
+// pinLsLimits forces the ls tool's caps back to the values they take
+// inside a git worktree (unset, i.e. 0 == "no cap"). config.Init assigns
+// MaxDepth=2 and MaxItems=100 when the process cwd is NOT inside a
+// worktree (internal/config/load.go), which makes ls append a depth
+// notice to its output. That notice lands in the request body, and
+// charm.land/x/vcr matches on body only, so every TestCoderAgent cassette
+// misses. Pinning here keeps the recorded bodies reproducible regardless
+// of how the tree was obtained.
 func pinLsLimits(c *config.Config) {
 	zero := 0
 	c.Tools.Ls.MaxDepth = &zero
@@ -199,10 +200,11 @@ func pinLsLimits(c *config.Config) {
 }
 
 func TestCoderAgentLsLimitsIndependentOfGit(t *testing.T) {
-	// config.Init decides via `git rev-parse --is-inside-work-tree` against the
-	// PROCESS cwd, not against workingDir, so the no-worktree branch can only
-	// be reached by actually changing directory. t.Chdir forbids t.Parallel and
-	// restores the cwd on cleanup.
+	// The no-worktree branch is selected by a `git rev-parse
+	// --is-inside-work-tree` probe against the PROCESS cwd, not against
+	// workingDir, so it can only be reached by actually changing
+	// directory. t.Chdir forbids t.Parallel and restores the cwd on
+	// cleanup.
 	t.Chdir(t.TempDir())
 
 	env := testEnv(t)
