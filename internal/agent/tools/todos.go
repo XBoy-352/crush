@@ -108,6 +108,12 @@ func NewTodosTool(sessions session.Service) fantasy.AgentTool {
 			// last task completed and stop without a second clear call.
 			autoCleared := len(todos) > 0 && completedCount == len(todos)
 			explicitClear := hadTodos && len(todos) == 0
+			// The transcript entry for the turn that finished the work
+			// must still show the ticked list and "n/n". Only the
+			// persisted list (which drives the pill) is cleared, so the
+			// snapshot the renderer reads is captured before the reset.
+			submitted := todos
+			submittedCompleted := completedCount
 			if autoCleared {
 				todos = nil
 				completedCount = 0
@@ -132,11 +138,11 @@ func NewTodosTool(sessions session.Service) fantasy.AgentTool {
 
 			metadata := TodosResponseMetadata{
 				IsNew:         isNew,
-				Todos:         currentSession.Todos,
+				Todos:         submitted,
 				JustCompleted: justCompleted,
 				JustStarted:   justStarted,
-				Completed:     completedCount,
-				Total:         len(todos),
+				Completed:     submittedCompleted,
+				Total:         len(submitted),
 				Cleared:       cleared,
 				AutoCleared:   autoCleared,
 			}
