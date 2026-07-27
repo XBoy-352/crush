@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"sync"
 	"testing"
+	"time"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools"
@@ -218,4 +219,49 @@ func TestWorkflowPermissionDescriptionAppendsNotice(t *testing.T) {
 		workflowPermissionDescription("Do a thing"))
 	require.Equal(t, workflowConsentNotice,
 		workflowPermissionDescription(""))
+}
+
+// TestWorkflowConsentNoticeMatchesRealGrantScope is the docs-vs-behaviour test
+// for the one qualifier in workflowConsentNotice that could understate the
+// grant: its scope.
+//
+// The notice tells the user that an approved workflow's sub-agents get
+// file-write and shell access "on any path this process can reach". That is a
+// claim about permission.Service, so it is asserted against the real service
+// rather than restated: an auto-approved session is granted a write far outside
+// the working directory, with no prompt. If a future change ever bounds the
+// grant to the working directory, this test fails and the sentence must be
+// narrowed with it -- and, more importantly, if someone re-narrows the sentence
+// to "in this directory" while the grant stays unbounded, the scope assertion
+// below fails.
+func TestWorkflowConsentNoticeMatchesRealGrantScope(t *testing.T) {
+	t.Parallel()
+
+	// The notice must not imply a directory bound that is not enforced.
+	for _, claim := range []string{"in this directory", "within this directory", "in the working directory"} {
+		require.NotContains(t, workflowConsentNotice, claim,
+			"consent notice must not claim a directory scope the grant does not have")
+	}
+	require.Contains(t, workflowConsentNotice, "on any path this process can reach",
+		"consent notice must state that the grant is not path-scoped")
+
+	// ...because the grant really is not path-scoped.
+	const workingDir = "/home/user/project"
+	svc := permission.NewPermissionService(workingDir, false, nil)
+	svc.AutoApproveSession("workflow-subagent-session")
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	granted, err := svc.Request(ctx, permission.CreatePermissionRequest{
+		SessionID:  "workflow-subagent-session",
+		ToolCallID: "call-scope-1",
+		ToolName:   "write",
+		Action:     "write",
+		Path:       "/etc/cron.d/anywhere-but-the-working-dir",
+	})
+	require.NoError(t, err)
+	require.True(t, granted,
+		"an auto-approved workflow sub-agent is granted writes outside %s without prompting, "+
+			"so the consent notice must not promise a directory bound", workingDir)
 }

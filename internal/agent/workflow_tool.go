@@ -354,7 +354,17 @@ func (c *coordinator) workflowTool(ctx context.Context) (fantasy.AgentTool, erro
 // The corresponding grant is the AutoApproveSession call in the spawn
 // closure above: a coder-profile sub-agent's session is auto-approved
 // for its lifetime, so its edit/write/bash calls never prompt again.
-const workflowConsentNotice = "Approving this workflow grants every sub-agent it starts file-write and shell access in this directory for the duration of the workflow, without prompting again for each action."
+//
+// The notice deliberately claims NO directory scope. permissionService.Request
+// consults autoApproveSessions[opts.SessionID] and returns true before it ever
+// reads opts.Path (internal/permission/permission.go:245-256), and neither the
+// write tool nor the bash tool constrains a path to the working directory --
+// bash even takes an arbitrary working_dir. So an auto-approved sub-agent may
+// write anywhere the process can. Saying "in this directory" would have been a
+// bound the code does not enforce, which is the same class of understatement as
+// the count this replaced. TestWorkflowConsentNoticeMatchesRealGrantScope pins
+// the sentence to that behaviour.
+const workflowConsentNotice = "Approving this workflow grants every sub-agent it starts file-write and shell access, on any path this process can reach, for the duration of the workflow, without prompting again for each action."
 
 // workflowPermissionDescription builds the text shown in the workflow
 // permission dialog: the model's own description of the workflow,
