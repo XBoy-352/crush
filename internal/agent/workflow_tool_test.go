@@ -182,24 +182,25 @@ agent("do", {agent = p})`},
 		{"no coder at all", `agent("summarise the README")`},
 	}
 
-	var texts []string
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			desc := workflowConsentFor(t, tc.script)
+	// Deliberately not subtests: the invariance assertion below compares the
+	// cases against each other, so they have to be collected in one goroutine
+	// before anything is compared.
+	texts := make([]string, len(cases))
+	for i, tc := range cases {
+		desc := workflowConsentFor(t, tc.script)
 
-			require.Contains(t, desc, workflowConsentNotice,
-				"consent text must state the capability granted")
-			require.Contains(t, desc, "file-write",
-				"consent text must name file-write access")
-			require.Contains(t, desc, "shell",
-				"consent text must name shell access")
-			require.Contains(t, desc, workflowTestDescription,
-				"consent text must keep the workflow's own description")
-			require.NotRegexp(t, `\d`, desc,
-				"consent text must not report a count derived from the script")
+		require.Contains(t, desc, workflowConsentNotice,
+			"case %q: consent text must state the capability granted", tc.name)
+		require.Contains(t, desc, "file-write",
+			"case %q: consent text must name file-write access", tc.name)
+		require.Contains(t, desc, "shell",
+			"case %q: consent text must name shell access", tc.name)
+		require.Contains(t, desc, workflowTestDescription,
+			"case %q: consent text must keep the workflow's own description", tc.name)
+		require.NotRegexp(t, `\d`, desc,
+			"case %q: consent text must not report a count derived from the script", tc.name)
 
-			texts = append(texts, desc)
-		})
+		texts[i] = desc
 	}
 
 	for i := range texts {
