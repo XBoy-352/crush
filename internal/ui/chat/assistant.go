@@ -130,7 +130,14 @@ type AssistantMessageItem struct {
 	anim    *anim.Anim
 	// workingLabel overrides the default spinner label (Thinking /
 	// Summarizing / Working) while set, e.g. a live retry countdown.
-	workingLabel      string
+	workingLabel string
+	// appliedLabel is the label last pushed into anim. renderSpinning
+	// runs on every animation frame (20fps, and the item is
+	// deliberately uncached while spinning), and anim.SetLabel
+	// re-renders the label and the ellipsis frames rune by rune through
+	// lipgloss — 104 allocs / 1669 B per call. Push only on change.
+	appliedLabel      string
+	labelApplied      bool
 	thinkingViewMode  thinkingViewMode
 	thinkingBoxHeight int // Tracks the rendered thinking box height for click detection.
 
@@ -532,15 +539,27 @@ func (a *AssistantMessageItem) SetWorkingLabel(label string) {
 func (a *AssistantMessageItem) renderSpinning() string {
 	switch {
 	case a.workingLabel != "":
-		a.anim.SetLabel(a.workingLabel)
+		a.setAnimLabel(a.workingLabel)
 	case a.message.IsThinking():
-		a.anim.SetLabel("Thinking")
+		a.setAnimLabel("Thinking")
 	case a.message.IsSummaryMessage:
-		a.anim.SetLabel("Summarizing")
+		a.setAnimLabel("Summarizing")
 	default:
-		a.anim.SetLabel("Working")
+		a.setAnimLabel("Working")
 	}
 	return a.anim.Render()
+}
+
+// setAnimLabel pushes a spinner label into anim only when it differs
+// from the one already applied. See the appliedLabel field comment: this
+// runs once per animation frame, and anim.SetLabel is not cheap.
+func (a *AssistantMessageItem) setAnimLabel(label string) {
+	if a.labelApplied && a.appliedLabel == label {
+		return
+	}
+	a.appliedLabel = label
+	a.labelApplied = true
+	a.anim.SetLabel(label)
 }
 
 // renderError renders an error message.
