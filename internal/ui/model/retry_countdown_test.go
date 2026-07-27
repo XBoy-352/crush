@@ -4,10 +4,14 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/crush/internal/agent/notify"
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/ui/common"
+	"github.com/charmbracelet/crush/internal/ui/notification"
 	"github.com/charmbracelet/crush/internal/ui/util"
+	"github.com/charmbracelet/crush/internal/workspace"
 	"github.com/stretchr/testify/require"
 )
 
@@ -117,4 +121,112 @@ func TestRetryNotificationWithNoSessionIsIgnored(t *testing.T) {
 	})
 	require.Nil(t, cmd)
 	require.Empty(t, m.status.msg.Msg)
+}
+
+// retryStubWorkspace is the minimum workspace surface handleAgentNotification
+// touches: Config for the notification policy check and the agent probes the
+// off-thread busy refresh performs. Anything else panics, which is the point.
+type retryStubWorkspace struct {
+	workspace.Workspace
+}
+
+func (retryStubWorkspace) Config() *config.Config { return nil }
+
+// recordingNotifyBackend captures desktop notifications instead of sending them.
+type recordingNotifyBackend struct {
+	sent []notification.Notification
+}
+
+func (b *recordingNotifyBackend) Send(n notification.Notification) tea.Cmd {
+	b.sent = append(b.sent, n)
+	return nil
+}
+
+// newTerminalEdgeTestUI builds a UI wired far enough to observe the
+// TypeAgentFinished / TypeAgentError terminal edge: desktop notification,
+// turn-timer stop and busy/queue invalidation.
+func newTerminalEdgeTestUI(t *testing.T) (*UI, *recordingNotifyBackend) {
+	t.Helper()
+	com := &common.Common{Workspace: retryStubWorkspace{}}
+	backend := &recordingNotifyBackend{}
+	m := &UI{
+		com:           com,
+		chat:          NewChat(com, ""),
+		status:        &Status{com: com},
+		notifyBackend: backend,
+	}
+	// shouldSendNotification requires focus reporting and an unfocused window.
+	m.caps.ReportFocusEvents = true
+	m.notifyWindowFocused = false
+	return m, backend
+}
+
+// TestBackgroundSessionFinishStillNotifies guards a regression introduced by
+// scoping the countdown: the session filter was applied to the whole of
+// handleAgentNotification, so a TypeAgentFinished for a session other than the
+// one on screen returned early and skipped the desktop notification, the turn
+// timer stop and the busy/prompt-queue invalidation. Those are exactly the
+// events that matter when the user is looking somewhere else -- the
+// notification body even names the session ("Agent's turn completed in %q"),
+// which is only meaningful for a session that is not the visible one. The
+// countdown alone is session-scoped.
+func TestBackgroundSessionFinishStillNotifies(t *testing.T) {
+	// Not parallel: asserts on the process-wide turn timer.
+	m, backend := newTerminalEdgeTestUI(t)
+	m.session = &session.Session{ID: "visible"}
+
+	common.StartTurn()
+	busyGen := m.busyFetchGen
+	queueGen := m.promptQueueGen
+
+	m.handleAgentNotification(notify.Notification{
+		SessionID:    "background",
+		SessionTitle: "Other work",
+		Type:         notify.TypeAgentFinished,
+	})
+
+	require.Len(t, backend.sent, 1,
+		"a background session finishing must still raise a desktop notification")
+	require.Contains(t, backend.sent[0].Message, "Other work")
+	require.Empty(t, common.Elapsed(),
+		"common.StopTurn must still run for a background session's terminal edge")
+	require.Greater(t, m.busyFetchGen, busyGen,
+		"the busy cache must still be invalidated on a background terminal edge")
+	require.Greater(t, m.promptQueueGen, queueGen,
+		"the prompt queue must still be invalidated on a background terminal edge")
+}
+
+// TestBackgroundSessionFinishDoesNotClearVisibleCountdown is the other half:
+// the terminal edge of an unrelated session must not wipe the countdown the
+// user is watching, even though it now runs the rest of the handler.
+func TestBackgroundSessionFinishDoesNotClearVisibleCountdown(t *testing.T) {
+	// Not parallel: asserts on the process-wide turn timer.
+	m, _ := newTerminalEdgeTestUI(t)
+	m.session = &session.Session{ID: "visible"}
+
+	require.NotNil(t, m.handleAgentNotification(notify.Notification{
+		SessionID:  "visible",
+		Type:       notify.TypeRetry,
+		Message:    "rate limit",
+		RetryDelay: 30 * time.Second,
+		Attempt:    1,
+		MaxRetries: 6,
+	}))
+	require.Contains(t, m.status.msg.Msg, "Retrying in")
+
+	m.handleAgentNotification(notify.Notification{
+		SessionID: "background",
+		Type:      notify.TypeAgentFinished,
+	})
+	require.Equal(t, notify.TypeRetry, m.retryStatus.Type,
+		"a background session finishing must not clear the visible session's countdown")
+	require.Contains(t, m.status.msg.Msg, "Retrying in")
+
+	// The visible session's own terminal edge does clear it.
+	m.handleAgentNotification(notify.Notification{
+		SessionID: "visible",
+		Type:      notify.TypeAgentFinished,
+	})
+	require.Empty(t, m.status.msg.Msg,
+		"the countdown's own session finishing must clear it")
 }

@@ -4657,17 +4657,22 @@ type retryTickMsg struct {
 // handleAgentNotification translates domain agent events into desktop
 // notifications using the UI notification backend.
 func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
-	// Ignore notifications for other sessions. Notifications with an
-	// empty SessionID (e.g. TypeReAuthenticate) are always delivered.
-	if n.SessionID != "" && (m.session == nil || n.SessionID != m.session.ID) {
-		return nil
-	}
 	var cmds []tea.Cmd
 	switch n.Type {
 	case notify.TypeRetry:
+		// The countdown paints the visible chat's spinner and the status
+		// bar, so it belongs to the session on screen. A retry on a
+		// background session (another turn, GenerateTitle, Summarize)
+		// must not hijack it. Only this branch is session-scoped: the
+		// terminal edges below drive the desktop notification and the
+		// busy/queue refresh for *any* session and must keep firing when
+		// the user is looking elsewhere.
+		if n.SessionID != "" && (m.session == nil || n.SessionID != m.session.ID) {
+			return nil
+		}
 		return m.beginRetryCountdown(n)
 	case notify.TypeAgentFinished:
-		m.clearRetryCountdown()
+		m.clearRetryCountdownFor(n.SessionID)
 		common.StopTurn()
 		cmds = append(cmds, m.sendNotification(notification.Notification{
 			Title:   "Crush is waiting...",
@@ -4679,7 +4684,7 @@ func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
 	case notify.TypeAgentError:
 		// Terminal edge like TypeAgentFinished; fall through to the
 		// busy/queue refresh below.
-		m.clearRetryCountdown()
+		m.clearRetryCountdownFor(n.SessionID)
 	case notify.TypeReAuthenticate:
 		return m.handleReAuthenticate(n.ProviderID)
 	default:
@@ -4708,6 +4713,16 @@ func (m *UI) beginRetryCountdown(n notify.Notification) tea.Cmd {
 	m.retryUntil = time.Now().Add(n.RetryDelay)
 	m.applyRetryCountdown()
 	return m.scheduleRetryTick(m.retrySeq)
+}
+
+// clearRetryCountdownFor stops the countdown only when it belongs to the
+// given session. A background session reaching its terminal edge must
+// not wipe the countdown the user is watching on the visible session.
+func (m *UI) clearRetryCountdownFor(sessionID string) {
+	if m.retryStatus.Type != notify.TypeRetry || m.retryStatus.SessionID != sessionID {
+		return
+	}
+	m.clearRetryCountdown()
 }
 
 // clearRetryCountdown stops any in-flight retry countdown and restores
