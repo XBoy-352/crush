@@ -2,10 +2,12 @@ package shell
 
 import (
 	"context"
+	"fmt"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 )
@@ -441,4 +443,94 @@ func TestSyncBufferHeapBounded(t *testing.T) {
 	}
 	require.Less(t, growth, int64(8<<20), "heap grew by %d bytes after writing %d", growth, total)
 	require.LessOrEqual(t, len(out), defaultSyncBufferHeadBytes+defaultSyncBufferTailBytes+128)
+}
+
+// TestSyncBufferTailWritesDoNotAllocate pins the tail to a fixed ring. A tail
+// that is re-sliced per write allocates and copies tailLimit bytes on every
+// write while holding the write lock, so draining a noisy child costs
+// O(total output) rather than O(1) amortized.
+func TestSyncBufferTailWritesDoNotAllocate(t *testing.T) {
+	// No t.Parallel: testing.AllocsPerRun panics in a parallel test.
+	sb := newSyncBuffer()
+	chunk := make([]byte, 32<<10)
+	// Fill the head and saturate the tail so every measured write takes the
+	// steady-state path.
+	for range 128 {
+		sb.Write(chunk)
+	}
+	allocs := testing.AllocsPerRun(200, func() {
+		sb.Write(chunk)
+	})
+	require.Zero(t, allocs, "steady-state tail write must not allocate, got %v allocs/op", allocs)
+	require.True(t, sb.truncated)
+	require.Equal(t, defaultSyncBufferTailBytes, sb.tailLen)
+}
+
+// TestSyncBufferSteadyStateDoesNotCreep asserts the retained window converges to
+// the documented bound instead of growing slowly forever, and that both the head
+// and the tail content actually survive (a one-sided length bound would also
+// pass on an empty buffer).
+func TestSyncBufferSteadyStateDoesNotCreep(t *testing.T) {
+	t.Parallel()
+	const head, tail = 64, 64
+	sb := &syncBuffer{headLimit: head, tailLimit: tail}
+	first := strings.Repeat("H", head)
+	sb.WriteString(first)
+	for i := range 200000 {
+		sb.WriteString(string(rune('a' + i%26)))
+	}
+	require.Equal(t, head, len(sb.head))
+	require.Equal(t, tail, sb.tailLen)
+	require.Equal(t, tail, len(sb.tail), "ring must stay exactly tailLimit bytes")
+
+	// Cap holds AND content survived, in both directions.
+	out := sb.String()
+	require.True(t, strings.HasPrefix(out, first), "head content lost")
+	require.LessOrEqual(t, len(out), head+tail+64)
+	require.Greater(t, len(out), head+tail)
+	require.Equal(t, 1, strings.Count(out, "bytes truncated"), "elision marker duplicated or lost")
+
+	// The marker must account for exactly what was dropped.
+	var reported int64
+	_, err := fmt.Sscanf(out[strings.Index(out, "["):], "[%d bytes truncated]", &reported)
+	require.NoError(t, err)
+	require.Equal(t, sb.total-int64(head+tail), reported)
+}
+
+// TestSyncBufferDoesNotSplitRunes guards the head and tail truncation points
+// against cutting a multi-byte rune in half, which renders as U+FFFD. PR #10
+// shipped exactly this bug in addLog.
+func TestSyncBufferDoesNotSplitRunes(t *testing.T) {
+	t.Parallel()
+	// headLimit 9 puts the boundary inside the 3-byte rune at offset 8;
+	// tailLimit 8 puts the tail boundary inside a 3-byte rune too.
+	sb := &syncBuffer{headLimit: 9, tailLimit: 8}
+	sb.WriteString("abcdefgh世界" + strings.Repeat("Q", 12) + "世界世")
+	out := sb.String()
+
+	require.True(t, utf8.ValidString(out), "truncated output must remain valid UTF-8: %q", out)
+	require.NotContains(t, out, string(utf8.RuneError), "truncation produced U+FFFD")
+	require.True(t, strings.HasPrefix(out, "abcdefgh"), "head content lost")
+	require.True(t, strings.HasSuffix(out, "界世"), "tail content lost: %q", out)
+
+	// Accounting stays exact after trimming the rune fragments.
+	var reported int64
+	_, err := fmt.Sscanf(out[strings.Index(out, "["):], "[%d bytes truncated]", &reported)
+	require.NoError(t, err)
+	visible := int64(len(out)) - int64(len(fmt.Sprintf("\n\n... [%d bytes truncated] ...\n\n", reported)))
+	require.Equal(t, sb.total, visible+reported, "marker must account for every dropped byte")
+}
+
+// TestSyncBufferZeroValueRetainsOutput guards against a syncBuffer constructed
+// outside newSyncBuffer silently discarding every byte, which a zero headLimit
+// and tailLimit would otherwise cause.
+func TestSyncBufferZeroValueRetainsOutput(t *testing.T) {
+	t.Parallel()
+	var sb syncBuffer
+	const msg = "this output must not vanish"
+	n, err := sb.WriteString(msg)
+	require.NoError(t, err)
+	require.Equal(t, len(msg), n)
+	require.Equal(t, msg, sb.String())
+	require.False(t, sb.truncated)
 }
