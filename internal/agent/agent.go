@@ -1913,16 +1913,10 @@ func (a *sessionAgent) GenerateTitle(ctx context.Context, sessionID string, user
 	}
 
 	maxRetries := providerMaxRetries
-	var retryAttempt atomic.Int32
 	streamCall := fantasy.AgentStreamCall{
 		Prompt:     fmt.Sprintf("Generate a concise title for the following content:\n\n%s\n <think>\n\n</think>", userPrompt),
 		Headers:    sessionHeaders(sessionID),
 		MaxRetries: &maxRetries,
-		OnRetry: func(err *fantasy.ProviderError, delay time.Duration) {
-			attempt := int(retryAttempt.Add(1))
-			slog.Warn("Provider request failed, retrying", providerRetryLogFields(err, delay, attempt, maxRetries)...)
-			a.publishRetry(sessionID, "", "", err, delay, attempt, maxRetries)
-		},
 		PrepareStep: func(callCtx context.Context, opts fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
 			prepared.Messages = opts.Messages
 			if systemPromptPrefix != "" {
@@ -1952,6 +1946,10 @@ func (a *sessionAgent) GenerateTitle(ctx context.Context, sessionID string, user
 		if attempt.model.CatwalkCfg.CanReason {
 			tok = attempt.model.CatwalkCfg.DefaultMaxTokens
 		}
+		// Each model attempt gets its own retry budget from fantasy, so
+		// it needs its own counter too. Sharing one across the
+		// small→large fallback made the countdown read "attempt 7/6".
+		streamCall.OnRetry = newRetryAttemptReporter(a, sessionID, attempt.model.ModelCfg.Provider, maxRetries)
 		agent := newAgent(attempt.model.Model, titlePrompt, tok)
 		resp, err = agent.Stream(ctx, streamCall)
 		if err == nil && resp.Response.FinishReason != fantasy.FinishReasonLength {
@@ -2475,6 +2473,21 @@ func providerRetryLogFields(err *fantasy.ProviderError, delay time.Duration, att
 		fields = append(fields, "message", err.Message)
 	}
 	return fields
+}
+
+// newRetryAttemptReporter returns an OnRetry callback with a fresh
+// attempt counter. Fantasy resets the retry budget for every
+// AgentStreamCall it runs, so a callback reused across two calls (the
+// GenerateTitle small→large fallback) must not carry the first call's
+// count into the second — otherwise the logged and user-visible attempt
+// number exceeds maxRetries ("attempt 7/6").
+func newRetryAttemptReporter(a *sessionAgent, sessionID, providerID string, maxRetries int) func(*fantasy.ProviderError, time.Duration) {
+	var retryAttempt atomic.Int32
+	return func(err *fantasy.ProviderError, delay time.Duration) {
+		attempt := int(retryAttempt.Add(1))
+		slog.Warn("Provider request failed, retrying", providerRetryLogFields(err, delay, attempt, maxRetries)...)
+		a.publishRetry(sessionID, "", providerID, err, delay, attempt, maxRetries)
+	}
 }
 
 // publishRetry notifies the UI that a provider request failed and the

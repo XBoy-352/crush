@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"log/slog"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1193,4 +1196,64 @@ func TestProviderRetryBudgetIsBounded(t *testing.T) {
 		"longest single backoff (%v) leaves the user watching a countdown with no way to tell Crush from a hang", longest)
 	require.LessOrEqual(t, total, 6*time.Minute,
 		"worst-case total retry wall time is %v", total)
+}
+
+// recordingPublisher captures published notifications.
+type recordingPublisher struct {
+	mu   sync.Mutex
+	sent []notify.Notification
+}
+
+func (p *recordingPublisher) Publish(_ pubsub.EventType, n notify.Notification) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.sent = append(p.sent, n)
+}
+
+func (p *recordingPublisher) PublishMustDeliver(_ context.Context, e pubsub.EventType, n notify.Notification) {
+	p.Publish(e, n)
+}
+
+func (p *recordingPublisher) attempts() []int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]int, 0, len(p.sent))
+	for _, n := range p.sent {
+		out = append(out, n.Attempt)
+	}
+	return out
+}
+
+// TestRetryAttemptReporterResetsPerCall guards the countdown's attempt
+// number. Fantasy resets the retry budget for every AgentStreamCall it
+// runs, so GenerateTitle's small->large model fallback performs two
+// independent retry passes. A single counter shared by both (the shape
+// before newRetryAttemptReporter existed) carried the first pass's count
+// into the second, and the user-facing countdown read "attempt 7/6".
+//
+// Note on scope: this pins the helper's contract -- each reporter starts
+// at 1 and never continues a previous one. The GenerateTitle call site
+// installs a fresh reporter per loop iteration; that wiring is
+// structural (no counter exists in the loop's scope to share any more)
+// rather than covered here, because the loop needs a live provider.
+func TestRetryAttemptReporterResetsPerCall(t *testing.T) {
+	t.Parallel()
+
+	pub := &recordingPublisher{}
+	a := &sessionAgent{notify: pub}
+	perr := &fantasy.ProviderError{Title: "rate limit"}
+
+	first := newRetryAttemptReporter(a, "s1", "prov", providerMaxRetries)
+	first(perr, time.Second)
+	first(perr, 2*time.Second)
+
+	second := newRetryAttemptReporter(a, "s1", "prov", providerMaxRetries)
+	second(perr, time.Second)
+
+	require.Equal(t, []int{1, 2, 1}, pub.attempts(),
+		"the second model attempt must restart the attempt count at 1")
+	for _, n := range pub.sent {
+		require.LessOrEqual(t, n.Attempt, n.MaxRetries,
+			"a published attempt number must never exceed the budget")
+	}
 }
