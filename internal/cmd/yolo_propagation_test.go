@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -37,10 +39,10 @@ func TestYoloFlagFromSubcommandReachesPermissionService(t *testing.T) {
 		{name: "yolo unset", args: []string{"run"}, want: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := bestEffortTempDir(t)
 			t.Setenv("HOME", dir)
-			t.Setenv("XDG_DATA_HOME", dir+"/data")
-			t.Setenv("XDG_CONFIG_HOME", dir+"/config")
+			t.Setenv("XDG_DATA_HOME", filepath.Join(dir, "data"))
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
 			t.Setenv("CRUSH_DISABLE_PROVIDER_AUTO_UPDATE", "1")
 
 			root := &cobra.Command{Use: "crush"}
@@ -66,7 +68,7 @@ func TestYoloFlagFromSubcommandReachesPermissionService(t *testing.T) {
 			root.AddCommand(run)
 
 			args := append([]string{}, tc.args...)
-			args = append(args, "--cwd", dir, "--data-dir", dir+"/.crush")
+			args = append(args, "--cwd", dir, "--data-dir", filepath.Join(dir, ".crush"))
 			root.SetArgs(args)
 			root.SetOut(discard{})
 			root.SetErr(discard{})
@@ -81,3 +83,21 @@ func TestYoloFlagFromSubcommandReachesPermissionService(t *testing.T) {
 type discard struct{}
 
 func (discard) Write(p []byte) (int, error) { return len(p), nil }
+
+// bestEffortTempDir returns a temp dir removed on a best-effort basis, unlike
+// t.TempDir() which FAILS the test when removal fails.
+//
+// setupLocalWorkspace opens handles that deliberately outlive it: internal/log.Setup
+// installs a process-global lumberjack rotator over <data-dir>/logs/crush.log
+// behind a sync.Once and never closes it, and the sqlite connection is owned by
+// the app. On Windows an open handle blocks removal, so t.TempDir() would fail
+// this test for a reason that has nothing to do with what it asserts. It did:
+// "TempDir RemoveAll cleanup: unlinkat ...\.crush\logs\crush.log: The process
+// cannot access the file because it is being used by another process."
+func bestEffortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "crush-yolo-")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
