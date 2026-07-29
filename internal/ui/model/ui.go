@@ -41,6 +41,7 @@ import (
 	"github.com/charmbracelet/crush/internal/home"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
+	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/question"
 	"github.com/charmbracelet/crush/internal/session"
@@ -360,9 +361,12 @@ type UI struct {
 	// agentBusyCache / yoloCache / planCache memoize the workspace busy and permission
 	// probes (synchronous HTTP round-trips in client/server mode). Reads
 	// never probe; refreshes happen off-thread (see workspace_cache.go).
-	agentBusyCache    ttlCache
-	yoloCache         ttlCache
-	planCache         ttlCache
+	agentBusyCache ttlCache
+	yoloCache      ttlCache
+	planCache      ttlCache
+	// fgWaitCache memoizes whether the current session has bash tools that
+	// can be manually backgrounded (Ctrl+B). Refreshed with busy probes.
+	fgWaitCache       ttlCache
 	busyFetchInFlight bool
 	// busyFetchGen is bumped by every busy/permission state transition;
 	// like promptQueueGen it lets a stale in-flight probe result be
@@ -707,6 +711,10 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case retryTickMsg:
 		if cmd := m.handleRetryTick(msg); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	case jobsLoadedMsg:
+		if cmd := m.handleJobsLoaded(msg); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 	case busyStateMsg:
@@ -1759,6 +1767,31 @@ func (m *UI) updateSessionMessage(msg message.Message) tea.Cmd {
 	return tea.Sequence(cmds...)
 }
 
+var workflowCallIDRe = regexp.MustCompile(`^(.+)-a\d+$`)
+
+func workflowBaseCallID(id string) (string, bool) {
+	m := workflowCallIDRe.FindStringSubmatch(id)
+	if len(m) == 2 {
+		return m[1], true
+	}
+	return "", false
+}
+
+func (m *UI) lookupNestedToolContainer(toolCallID string) chat.NestedToolContainer {
+	item := m.chat.MessageItem(toolCallID)
+	if item == nil {
+		return nil
+	}
+	if container, ok := item.(chat.NestedToolContainer); ok {
+		if toolMessageItem, ok := item.(chat.ToolMessageItem); ok {
+			if toolMessageItem.ToolCall().ID == toolCallID {
+				return container
+			}
+		}
+	}
+	return nil
+}
+
 // handleChildSessionMessage handles messages from child sessions (agent tools).
 func (m *UI) handleChildSessionMessage(event pubsub.Event[message.Message]) tea.Cmd {
 	var cmds []tea.Cmd
@@ -1776,21 +1809,11 @@ func (m *UI) handleChildSessionMessage(event pubsub.Event[message.Message]) tea.
 	}
 
 	// Find the parent agent tool item.
-	var agentItem chat.NestedToolContainer
-	for i := 0; i < m.chat.Len(); i++ {
-		item := m.chat.MessageItem(toolCallID)
-		if item == nil {
-			continue
-		}
-		if agent, ok := item.(chat.NestedToolContainer); ok {
-			if toolMessageItem, ok := item.(chat.ToolMessageItem); ok {
-				if toolMessageItem.ToolCall().ID == toolCallID {
-					// Verify this agent belongs to the correct parent message.
-					// We can't directly check parentMessageID on the item, so we trust the session parsing.
-					agentItem = agent
-					break
-				}
-			}
+	agentItem := m.lookupNestedToolContainer(toolCallID)
+
+	if agentItem == nil {
+		if base, ok := workflowBaseCallID(toolCallID); ok {
+			agentItem = m.lookupNestedToolContainer(base)
 		}
 	}
 
@@ -2151,6 +2174,22 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		// revert scope dialog next.
 		m.dialog.CloseDialog(dialog.RevertPickerID)
 		m.dialog.OpenDialog(dialog.NewRevert(m.com, msg.MessageID, msg.MessageContent))
+
+	// ActionKillJob kills a background shell job. The registry lives in
+	// the agent process, so this is an HTTP round-trip in client/server
+	// mode and must not run on the Update goroutine.
+	case dialog.ActionKillJob:
+		m.dialog.CloseDialog(dialog.JobsID)
+		ws := m.com.Workspace
+		shellID := msg.ShellID
+		cmds = append(cmds, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := ws.KillBackgroundJob(ctx, shellID); err != nil {
+				return util.NewErrorMsg(err)
+			}
+			return util.NewInfoMsg("Killed job " + shellID)
+		})
 	default:
 		cmds = append(cmds, util.CmdHandler(msg))
 	}
@@ -2508,6 +2547,31 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 	if key.Matches(msg, m.keyMap.Chat.Cancel) {
 		if m.isAgentBusy() {
 			if cmd := m.cancelAgent(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			return tea.Batch(cmds...)
+		}
+	}
+
+	// Move blocking bash tools to background without canceling the turn.
+	// Only intercept when something is actually waiting; otherwise leave
+	// ctrl+b for the textarea (character-backward) while the user types.
+	//
+	// The decision reads the memoized value only. Probing the workspace
+	// here would be a blocking, timeout-less HTTP round-trip in
+	// client/server mode (ClientWorkspace.AgentHasForegroundWaits ->
+	// GetAgentSessionInfo with context.Background()), on the Update
+	// goroutine, triggered by an ordinary text-editing keystroke — a
+	// slow or wedged server would freeze the whole TUI mid-word. See the
+	// invariant at the top of workspace_cache.go.
+	//
+	// The cost is a bounded window: a bash tool that starts blocking just
+	// after the last probe is not backgroundable until the busy backstop
+	// refreshes (<= busyCacheTTL), so the first Ctrl+B may only move the
+	// cursor and the next one works.
+	if key.Matches(msg, m.keyMap.Chat.Background) {
+		if m.isAgentBusy() && m.hasForegroundWaitsCached() {
+			if cmd := m.backgroundForegroundTools(); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
 			return tea.Batch(cmds...)
@@ -3123,7 +3187,7 @@ func (m *UI) ShortHelp() []key.Binding {
 	case uiInitialize:
 		binds = append(binds, k.Quit)
 	case uiChat:
-		// Show cancel binding if agent is busy.
+		// Show cancel/background bindings if agent is busy.
 		if m.isAgentBusy() {
 			cancelBinding := k.Chat.Cancel
 			if m.isCanceling {
@@ -3132,6 +3196,9 @@ func (m *UI) ShortHelp() []key.Binding {
 				cancelBinding.SetHelp("esc", "clear queue")
 			}
 			binds = append(binds, cancelBinding)
+			if m.hasForegroundWaitsCached() {
+				binds = append(binds, k.Chat.Background)
+			}
 		}
 
 		switch m.focus {
@@ -3219,7 +3286,7 @@ func (m *UI) FullHelp() [][]key.Binding {
 				k.Quit,
 			})
 	case uiChat:
-		// Show cancel binding if agent is busy.
+		// Show cancel/background bindings if agent is busy.
 		if m.isAgentBusy() {
 			cancelBinding := k.Chat.Cancel
 			if m.isCanceling {
@@ -3228,6 +3295,9 @@ func (m *UI) FullHelp() [][]key.Binding {
 				cancelBinding.SetHelp("esc", "clear queue")
 			}
 			binds = append(binds, []key.Binding{cancelBinding})
+			if m.hasForegroundWaitsCached() {
+				binds = append(binds, []key.Binding{k.Chat.Background})
+			}
 		}
 
 		mainBinds := []key.Binding{}
@@ -3984,6 +4054,13 @@ func (m *UI) isAgentBusy() bool {
 	return m.agentBusyCache.val
 }
 
+// hasForegroundWaitsCached reports whether the current session has bash
+// tools that can be manually backgrounded. Memoized with busy probes so
+// the Ctrl+B intercept never does sync IO on the Update goroutine.
+func (m *UI) hasForegroundWaitsCached() bool {
+	return m.hasSession() && m.fgWaitCache.val
+}
+
 // hasSession returns true if there is an active session with a valid ID.
 func (m *UI) hasSession() bool {
 	return m.session != nil && m.session.ID != ""
@@ -4269,6 +4346,35 @@ func cancelTimerCmd() tea.Cmd {
 	})
 }
 
+// backgroundForegroundTools releases bash tools still blocking the agent
+// turn so they continue as background jobs (Ctrl+B). Does not cancel the
+// agent; the model receives a tool result and can continue. Queued prompts
+// without a RunID are folded into the next PrepareStep, so they typically
+// run as soon as the released tool returns.
+func (m *UI) backgroundForegroundTools() tea.Cmd {
+	if !m.hasSession() {
+		return nil
+	}
+	if !m.com.Workspace.AgentIsReady() {
+		return nil
+	}
+	sessionID := m.session.ID
+	ws := m.com.Workspace
+	// Optimistic: binding should stop intercepting until the next probe.
+	m.fgWaitCache.set(false)
+	// Run off the Update goroutine: client mode does a network round-trip.
+	return func() tea.Msg {
+		n := ws.AgentBackgroundForegroundTools(sessionID)
+		if n == 0 {
+			return util.NewInfoMsg("No foreground tools to background")
+		}
+		if n == 1 {
+			return util.NewInfoMsg("Moved 1 tool to background")
+		}
+		return util.NewInfoMsg(fmt.Sprintf("Moved %d tools to background", n))
+	}
+}
+
 // cancelAgent handles the cancel key press. The first press sets isCanceling to true
 // and starts a timer. The second press (before the timer expires) actually
 // cancels the agent.
@@ -4361,6 +4467,10 @@ func (m *UI) openDialog(id string) tea.Cmd {
 		if cmd := m.openBtwDialog(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+	case dialog.JobsID:
+		if cmd := m.openJobsDialog(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	default:
 		// Unknown dialog
 		break
@@ -4392,6 +4502,55 @@ func (m *UI) openQuitDialog() tea.Cmd {
 
 	quitDialog := dialog.NewQuit(m.com)
 	m.dialog.OpenDialog(quitDialog)
+	return nil
+}
+
+// openJobsDialog opens the background jobs dialog.
+//
+// The job list is fetched off the Update goroutine: the background shell
+// registry lives in the agent process, so under CRUSH_CLIENT_SERVER=1 this
+// is an HTTP round-trip, and the UI guidelines forbid IO in Update. The
+// dialog is opened when the jobsLoadedMsg lands.
+func (m *UI) openJobsDialog() tea.Cmd {
+	if m.dialog.ContainsDialog(dialog.JobsID) {
+		m.dialog.BringToFront(dialog.JobsID)
+		return nil
+	}
+	ws := m.com.Workspace
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		jobs, err := ws.ListBackgroundJobs(ctx)
+		return jobsLoadedMsg{jobs: jobs, err: err}
+	}
+}
+
+// jobsLoadedMsg delivers the background job list fetched off-thread for the
+// jobs dialog. err is carried rather than swallowed so a client that cannot
+// reach the server says so instead of showing an empty job list, which is
+// indistinguishable from "no jobs are running".
+type jobsLoadedMsg struct {
+	jobs []proto.BackgroundJob
+	err  error
+}
+
+// handleJobsLoaded opens the jobs dialog with the fetched list. Runs on the
+// Update goroutine.
+func (m *UI) handleJobsLoaded(msg jobsLoadedMsg) tea.Cmd {
+	if msg.err != nil {
+		return util.ReportError(msg.err)
+	}
+	// The fetch is asynchronous, so a second /jobs could have opened the
+	// dialog while this one was in flight; do not stack a duplicate.
+	if m.dialog.ContainsDialog(dialog.JobsID) {
+		m.dialog.BringToFront(dialog.JobsID)
+		return nil
+	}
+	jobsDialog, err := dialog.NewJobs(m.com, msg.jobs)
+	if err != nil {
+		return util.ReportError(err)
+	}
+	m.dialog.OpenDialog(jobsDialog)
 	return nil
 }
 
@@ -4687,6 +4846,8 @@ func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
 		m.clearRetryCountdownFor(n.SessionID)
 	case notify.TypeReAuthenticate:
 		return m.handleReAuthenticate(n.ProviderID)
+	case notify.TypeWorkflowProgress:
+		return m.handleWorkflowProgress(n.WorkflowProgress)
 	default:
 		return nil
 	}
@@ -4703,6 +4864,24 @@ func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
 		cmds = append(cmds, cmd)
 	}
 	return tea.Batch(cmds...)
+}
+
+// handleWorkflowProgress forwards a live workflow progress event to the
+// corresponding WorkflowToolMessageItem in the chat.
+func (m *UI) handleWorkflowProgress(wp *notify.WorkflowProgress) tea.Cmd {
+	if wp == nil {
+		return nil
+	}
+	item := m.chat.MessageItem(wp.ToolCallID)
+	if item == nil {
+		return nil
+	}
+	wf, ok := item.(*chat.WorkflowToolMessageItem)
+	if !ok {
+		return nil
+	}
+	wf.SetProgress(wp.Running, wp.Completed, wp.Total, wp.Index, wp.Kind, wp.Label, wp.Message)
+	return nil
 }
 
 // beginRetryCountdown starts (or replaces) the live provider-retry
