@@ -41,10 +41,10 @@ import (
 	"github.com/charmbracelet/crush/internal/home"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
+	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/question"
 	"github.com/charmbracelet/crush/internal/session"
-	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/charmbracelet/crush/internal/skills"
 	"github.com/charmbracelet/crush/internal/stringext"
 	"github.com/charmbracelet/crush/internal/ui/anim"
@@ -711,6 +711,10 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case retryTickMsg:
 		if cmd := m.handleRetryTick(msg); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	case jobsLoadedMsg:
+		if cmd := m.handleJobsLoaded(msg); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 	case busyStateMsg:
@@ -2171,15 +2175,21 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		m.dialog.CloseDialog(dialog.RevertPickerID)
 		m.dialog.OpenDialog(dialog.NewRevert(m.com, msg.MessageID, msg.MessageContent))
 
-	// ActionKillJob kills a background shell job.
+	// ActionKillJob kills a background shell job. The registry lives in
+	// the agent process, so this is an HTTP round-trip in client/server
+	// mode and must not run on the Update goroutine.
 	case dialog.ActionKillJob:
 		m.dialog.CloseDialog(dialog.JobsID)
-		manager := shell.GetBackgroundShellManager()
-		if err := manager.Kill(msg.ShellID); err != nil {
-			cmds = append(cmds, util.ReportError(err))
-		} else {
-			cmds = append(cmds, util.ReportInfo("Killed job "+msg.ShellID))
-		}
+		ws := m.com.Workspace
+		shellID := msg.ShellID
+		cmds = append(cmds, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := ws.KillBackgroundJob(ctx, shellID); err != nil {
+				return util.NewErrorMsg(err)
+			}
+			return util.NewInfoMsg("Killed job " + shellID)
+		})
 	default:
 		cmds = append(cmds, util.CmdHandler(msg))
 	}
@@ -4496,12 +4506,47 @@ func (m *UI) openQuitDialog() tea.Cmd {
 }
 
 // openJobsDialog opens the background jobs dialog.
+//
+// The job list is fetched off the Update goroutine: the background shell
+// registry lives in the agent process, so under CRUSH_CLIENT_SERVER=1 this
+// is an HTTP round-trip, and the UI guidelines forbid IO in Update. The
+// dialog is opened when the jobsLoadedMsg lands.
 func (m *UI) openJobsDialog() tea.Cmd {
 	if m.dialog.ContainsDialog(dialog.JobsID) {
 		m.dialog.BringToFront(dialog.JobsID)
 		return nil
 	}
-	jobsDialog, err := dialog.NewJobs(m.com)
+	ws := m.com.Workspace
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		jobs, err := ws.ListBackgroundJobs(ctx)
+		return jobsLoadedMsg{jobs: jobs, err: err}
+	}
+}
+
+// jobsLoadedMsg delivers the background job list fetched off-thread for the
+// jobs dialog. err is carried rather than swallowed so a client that cannot
+// reach the server says so instead of showing an empty job list, which is
+// indistinguishable from "no jobs are running".
+type jobsLoadedMsg struct {
+	jobs []proto.BackgroundJob
+	err  error
+}
+
+// handleJobsLoaded opens the jobs dialog with the fetched list. Runs on the
+// Update goroutine.
+func (m *UI) handleJobsLoaded(msg jobsLoadedMsg) tea.Cmd {
+	if msg.err != nil {
+		return util.ReportError(msg.err)
+	}
+	// The fetch is asynchronous, so a second /jobs could have opened the
+	// dialog while this one was in flight; do not stack a duplicate.
+	if m.dialog.ContainsDialog(dialog.JobsID) {
+		m.dialog.BringToFront(dialog.JobsID)
+		return nil
+	}
+	jobsDialog, err := dialog.NewJobs(m.com, msg.jobs)
 	if err != nil {
 		return util.ReportError(err)
 	}

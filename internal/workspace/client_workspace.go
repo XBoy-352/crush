@@ -228,6 +228,14 @@ func (w *ClientWorkspace) AgentBackgroundForegroundTools(sessionID string) int {
 	return n
 }
 
+func (w *ClientWorkspace) ListBackgroundJobs(ctx context.Context) ([]proto.BackgroundJob, error) {
+	return w.client.ListBackgroundJobs(ctx, w.workspaceID())
+}
+
+func (w *ClientWorkspace) KillBackgroundJob(ctx context.Context, jobID string) error {
+	return w.client.KillBackgroundJob(ctx, w.workspaceID(), jobID)
+}
+
 func (w *ClientWorkspace) AgentHasForegroundWaits(sessionID string) bool {
 	info, err := w.client.GetAgentSessionInfo(context.Background(), w.workspaceID(), sessionID)
 	if err != nil {

@@ -888,6 +888,47 @@ func (c *controllerV1) handlePostWorkspaceAgentSessionBackground(w http.Response
 	jsonEncode(w, result)
 }
 
+// handleGetWorkspaceJobs lists the background shell jobs, oldest first.
+//
+//	@Summary		List background jobs
+//	@Tags			jobs
+//	@Produce		json
+//	@Param			id	path	string	true	"Workspace ID"
+//	@Success		200	{array}		proto.BackgroundJob
+//	@Failure		404	{object}	proto.Error
+//	@Failure		500	{object}	proto.Error
+//	@Router			/workspaces/{id}/jobs [get]
+func (c *controllerV1) handleGetWorkspaceJobs(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	jobs, err := c.backend.ListBackgroundJobs(r.Context(), id)
+	if err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+	jsonEncode(w, jobs)
+}
+
+// handleDeleteWorkspaceJob kills one background shell job.
+//
+//	@Summary		Kill a background job
+//	@Tags			jobs
+//	@Produce		json
+//	@Param			id	path	string	true	"Workspace ID"
+//	@Param			jid	path	string	true	"Background job ID"
+//	@Success		200
+//	@Failure		404	{object}	proto.Error
+//	@Failure		500	{object}	proto.Error
+//	@Router			/workspaces/{id}/jobs/{jid} [delete]
+func (c *controllerV1) handleDeleteWorkspaceJob(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	jid := r.PathValue("jid")
+	if err := c.backend.KillBackgroundJob(r.Context(), id, jid); err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
 // handlePostWorkspaceAgentSessionRevert reverts a session to a checkpoint.
 //
 //	@Summary		Revert agent session
@@ -1321,6 +1362,11 @@ func (c *controllerV1) handleError(w http.ResponseWriter, r *http.Request, err e
 		status = http.StatusNotFound
 	case errors.Is(err, backend.ErrWorkspaceClosing):
 		status = http.StatusConflict
+	case errors.Is(err, backend.ErrBackgroundJobNotFound):
+		// A job that finished and was cleaned up between the client
+		// listing it and asking to kill it is an expected race, not a
+		// server fault.
+		status = http.StatusNotFound
 	}
 	c.server.logError(r, err.Error())
 	jsonError(w, status, err.Error())

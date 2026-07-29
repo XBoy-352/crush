@@ -873,6 +873,37 @@ func (c *Client) BackgroundAgentSessionForegroundTools(ctx context.Context, id s
 	return result.Released, nil
 }
 
+// ListBackgroundJobs retrieves the workspace's background shell jobs,
+// oldest first.
+func (c *Client) ListBackgroundJobs(ctx context.Context, id string) ([]proto.BackgroundJob, error) {
+	rsp, err := c.get(ctx, fmt.Sprintf("/workspaces/%s/jobs", id), nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get background jobs: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to get background jobs: status code %d", rsp.StatusCode)
+	}
+	var jobs []proto.BackgroundJob
+	if err := json.NewDecoder(rsp.Body).Decode(&jobs); err != nil {
+		return nil, fmt.Errorf("failed to decode background jobs: %w", err)
+	}
+	return jobs, nil
+}
+
+// KillBackgroundJob terminates one background shell job by ID.
+func (c *Client) KillBackgroundJob(ctx context.Context, id string, jobID string) error {
+	rsp, err := c.delete(ctx, fmt.Sprintf("/workspaces/%s/jobs/%s", id, jobID), nil, nil)
+	if err != nil {
+		return fmt.Errorf("failed to kill background job: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to kill background job: status code %d", rsp.StatusCode)
+	}
+	return nil
+}
+
 // RevertToMessageResult describes the outcome of a revert operation.
 type RevertToMessageResult struct {
 	MessagesDeleted int      `json:"messages_deleted"`

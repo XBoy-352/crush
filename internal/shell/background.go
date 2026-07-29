@@ -2,6 +2,7 @@ package shell
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -12,6 +13,13 @@ import (
 
 	"github.com/charmbracelet/crush/internal/csync"
 )
+
+// ErrBackgroundShellNotFound is returned by Kill and Remove when no
+// background shell with the given ID is registered. It is a sentinel so
+// callers across process boundaries can map it to a 404 instead of a 500:
+// a job that finished and was cleaned up between a client listing it and
+// asking to kill it is an expected race, not a server fault.
+var ErrBackgroundShellNotFound = errors.New("background shell not found")
 
 const (
 	// MaxBackgroundJobs is the maximum number of concurrent background jobs allowed
@@ -311,7 +319,7 @@ func (m *BackgroundShellManager) Get(id string) (*BackgroundShell, bool) {
 func (m *BackgroundShellManager) Remove(id string) error {
 	_, ok := m.shells.Take(id)
 	if !ok {
-		return fmt.Errorf("background shell not found: %s", id)
+		return fmt.Errorf("%w: %s", ErrBackgroundShellNotFound, id)
 	}
 	return nil
 }
@@ -320,7 +328,7 @@ func (m *BackgroundShellManager) Remove(id string) error {
 func (m *BackgroundShellManager) Kill(id string) error {
 	shell, ok := m.shells.Take(id)
 	if !ok {
-		return fmt.Errorf("background shell not found: %s", id)
+		return fmt.Errorf("%w: %s", ErrBackgroundShellNotFound, id)
 	}
 
 	shell.cancel()

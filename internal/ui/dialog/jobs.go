@@ -5,7 +5,7 @@ import (
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
-	"github.com/charmbracelet/crush/internal/shell"
+	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/list"
 	"github.com/charmbracelet/crush/internal/ui/util"
@@ -31,7 +31,7 @@ type Jobs struct {
 
 	mode jobsMode
 
-	jobs []*shell.BackgroundShell
+	jobs []proto.BackgroundJob
 
 	keyMap struct {
 		Kill        key.Binding
@@ -47,10 +47,17 @@ type Jobs struct {
 
 var _ Dialog = (*Jobs)(nil)
 
-// NewJobs creates a new Jobs dialog.
-func NewJobs(com *common.Common) (*Jobs, error) {
+// NewJobs creates a new Jobs dialog over an already-fetched job list.
+//
+// The list is passed in rather than read here: the background shell
+// registry lives in the agent process, so under CRUSH_CLIENT_SERVER=1 it is
+// only reachable over HTTP, and the dialog is constructed from the Update
+// goroutine. The caller fetches off-thread (see UI.openJobsDialog) and this
+// constructor stays pure.
+func NewJobs(com *common.Common, jobs []proto.BackgroundJob) (*Jobs, error) {
 	j := &Jobs{
 		com:  com,
+		jobs: jobs,
 		mode: jobsModeNormal,
 	}
 
@@ -128,7 +135,7 @@ func (j *Jobs) HandleMsg(msg tea.Msg) Action {
 			case key.Matches(msg, j.keyMap.Close):
 				return ActionClose{}
 			case key.Matches(msg, j.keyMap.Kill):
-				if j.selectedJob() == nil {
+				if _, ok := j.selectedJob(); !ok {
 					return ActionCmd{Cmd: util.ReportWarn("No job selected")}
 				}
 				j.mode = jobsModeKilling
@@ -153,7 +160,7 @@ func (j *Jobs) HandleMsg(msg tea.Msg) Action {
 				// Killing a job is destructive and irreversible, so enter
 				// asks first exactly like ctrl+x rather than terminating
 				// the highlighted job outright.
-				if j.selectedJob() == nil {
+				if _, ok := j.selectedJob(); !ok {
 					return ActionCmd{Cmd: util.ReportWarn("No job selected")}
 				}
 				j.mode = jobsModeKilling
@@ -222,30 +229,76 @@ func (j *Jobs) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	return cur
 }
 
-// refresh reloads the background shell list and rebuilds list items.
+// refresh rebuilds the list items from the jobs already held by the dialog.
+//
+// It performs no IO. It is called from HandleMsg — i.e. on the Update
+// goroutine — whenever the mode changes, because the item styling depends on
+// the mode; re-fetching the job list there would put a synchronous HTTP
+// round-trip on a keypress in client/server mode.
 func (j *Jobs) refresh() {
-	manager := shell.GetBackgroundShellManager()
-	j.jobs = manager.ListJobs()
+	// Remember the highlighted job by ID, not by index: the rebuild
+	// re-applies the filter, which changes how many rows precede it, and
+	// confirming a kill must terminate the job the user highlighted.
+	var selectedID string
+	if job, ok := j.selectedJob(); ok {
+		selectedID = job.ID
+	}
 
 	items := make([]list.FilterableItem, 0, len(j.jobs))
 	for _, job := range j.jobs {
 		items = append(items, NewJobItem(j.com.Styles, job, j.mode))
 	}
 	j.list.SetItems(items...)
+	// FilterableList.SetItems installs the *unfiltered* set, so without
+	// this the rebuild triggered by arming a kill would silently widen a
+	// filtered list back to every job.
+	j.list.SetFilter(j.input.Value())
+	j.selectJob(selectedID)
 }
 
-func (j *Jobs) selectedJob() *shell.BackgroundShell {
-	if item := j.list.SelectedItem(); item != nil {
-		if ji, ok := item.(*JobItem); ok {
-			return ji.job
+// selectJob highlights the row for id, or the first row when id is empty or
+// no longer listed. The list's own SetSelected(0) in the constructor runs
+// before any item exists and therefore leaves the selection at -1; without
+// this the first ctrl+x after opening /jobs would answer "No job selected"
+// with jobs plainly on screen.
+func (j *Jobs) selectJob(id string) {
+	items := j.list.FilteredItems()
+	if len(items) == 0 {
+		j.list.SetSelected(-1)
+		return
+	}
+	if id != "" {
+		for i, item := range items {
+			if ji, ok := item.(*JobItem); ok && ji.job.ID == id {
+				j.list.SetSelected(i)
+				return
+			}
 		}
 	}
-	return nil
+	j.list.SetSelected(0)
+}
+
+// Jobs returns the job list the dialog is rendering, in list order. The
+// dialog is a pure view over what the workspace returned, so this is what
+// the user is looking at.
+func (j *Jobs) Jobs() []proto.BackgroundJob {
+	return j.jobs
+}
+
+// selectedJob returns the highlighted job, or ok=false when the list is
+// empty or the selection is not a job item.
+func (j *Jobs) selectedJob() (proto.BackgroundJob, bool) {
+	if item := j.list.SelectedItem(); item != nil {
+		if ji, ok := item.(*JobItem); ok {
+			return ji.job, true
+		}
+	}
+	return proto.BackgroundJob{}, false
 }
 
 func (j *Jobs) confirmKill() Action {
-	job := j.selectedJob()
-	if job == nil {
+	job, ok := j.selectedJob()
+	if !ok {
 		return ActionCmd{Cmd: util.ReportWarn("No job selected")}
 	}
 	return ActionKillJob{ShellID: job.ID}

@@ -202,6 +202,38 @@ func (b *Backend) BackgroundSessionForegroundTools(ctx context.Context, workspac
 	return BackgroundSessionResult{Released: n}, nil
 }
 
+// ListBackgroundJobs returns the background shell jobs, oldest first.
+//
+// Like BackgroundSessionForegroundTools this validates the workspace before
+// touching the process-global background shell registry, so a client can
+// only reach jobs through a workspace it has already resolved.
+func (b *Backend) ListBackgroundJobs(_ context.Context, workspaceID string) ([]proto.BackgroundJob, error) {
+	if _, err := b.GetWorkspace(workspaceID); err != nil {
+		return nil, err
+	}
+	shells := shell.GetBackgroundShellManager().ListJobs()
+	jobs := make([]proto.BackgroundJob, 0, len(shells))
+	for _, s := range shells {
+		jobs = append(jobs, proto.BackgroundJob{
+			ID:          s.ID,
+			Command:     s.Command,
+			Description: s.Description,
+			StartedAt:   s.StartedAt,
+			Done:        s.IsDone(),
+		})
+	}
+	return jobs, nil
+}
+
+// KillBackgroundJob terminates one background shell job by ID. Returns
+// ErrBackgroundJobNotFound when the job is already gone.
+func (b *Backend) KillBackgroundJob(_ context.Context, workspaceID, jobID string) error {
+	if _, err := b.GetWorkspace(workspaceID); err != nil {
+		return err
+	}
+	return shell.GetBackgroundShellManager().Kill(jobID)
+}
+
 // RevertResult describes the outcome of a revert operation.
 type RevertResult struct {
 	MessagesDeleted int      `json:"messages_deleted"`

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/charmbracelet/crush/internal/shell"
+	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/ui/list"
 	"github.com/charmbracelet/crush/internal/ui/styles"
 	"github.com/sahilm/fuzzy"
@@ -13,7 +13,7 @@ import (
 // JobItem wraps a BackgroundShell to implement the ListItem interface.
 type JobItem struct {
 	*list.Versioned
-	job      *shell.BackgroundShell
+	job      proto.BackgroundJob
 	t        *styles.Styles
 	mode     jobsMode
 	m        fuzzy.Match
@@ -25,7 +25,7 @@ type JobItem struct {
 var _ ListItem = (*JobItem)(nil)
 
 // NewJobItem creates a new JobItem.
-func NewJobItem(t *styles.Styles, job *shell.BackgroundShell, mode jobsMode) *JobItem {
+func NewJobItem(t *styles.Styles, job proto.BackgroundJob, mode jobsMode) *JobItem {
 	return &JobItem{
 		Versioned: list.NewVersioned(),
 		job:       job,
@@ -75,7 +75,7 @@ func (j *JobItem) SetMatch(m fuzzy.Match) {
 
 // InfoText returns the elapsed time for the job.
 func (j *JobItem) InfoText() string {
-	if j.job.IsDone() {
+	if j.job.Done {
 		return "done"
 	}
 	elapsed := time.Since(j.job.StartedAt).Truncate(time.Second)
