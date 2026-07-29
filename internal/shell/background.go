@@ -1,46 +1,225 @@
 package shell
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/crush/internal/csync"
 )
+
+// ErrBackgroundShellNotFound is returned by Kill and Remove when no
+// background shell with the given ID is registered. It is a sentinel so
+// callers across process boundaries can map it to a 404 instead of a 500:
+// a job that finished and was cleaned up between a client listing it and
+// asking to kill it is an expected race, not a server fault.
+var ErrBackgroundShellNotFound = errors.New("background shell not found")
 
 const (
 	// MaxBackgroundJobs is the maximum number of concurrent background jobs allowed
 	MaxBackgroundJobs = 50
 	// CompletedJobRetentionMinutes is how long to keep completed jobs before auto-cleanup (8 hours)
 	CompletedJobRetentionMinutes = 8 * 60
+
+	defaultSyncBufferHeadBytes = 1 << 20 // 1 MiB
+	defaultSyncBufferTailBytes = 1 << 20 // 1 MiB
 )
 
-// syncBuffer is a thread-safe wrapper around bytes.Buffer.
+// syncBuffer is a thread-safe output buffer that retains a fixed head and a
+// rolling tail once the stream exceeds head+tail bytes. A single large Write
+// never retains more than head+tail bytes of payload.
+//
+// The tail is a fixed-capacity ring buffer, so a write costs O(len(p)) and
+// allocates nothing once the ring exists. Re-slicing the tail on every write
+// instead would copy and re-allocate tailLimit bytes per write, making the
+// cost of draining a noisy child O(total output) rather than O(1) amortized,
+// all of it under the write lock that String readers contend on.
 type syncBuffer struct {
-	buf bytes.Buffer
-	mu  sync.RWMutex
+	mu        sync.RWMutex
+	headLimit int
+	tailLimit int
+	head      []byte
+	tail      []byte // ring of exactly tailLimit bytes, allocated on first use
+	tailStart int    // index of the oldest retained byte in tail
+	tailLen   int    // number of valid bytes in the ring
+	total     int64
+	truncated bool
+}
+
+func newSyncBuffer() *syncBuffer {
+	return &syncBuffer{
+		headLimit: defaultSyncBufferHeadBytes,
+		tailLimit: defaultSyncBufferTailBytes,
+	}
 }
 
 func (sb *syncBuffer) Write(p []byte) (n int, err error) {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
-	return sb.buf.Write(p)
+	sb.writeLocked(p)
+	return len(p), nil
 }
 
 func (sb *syncBuffer) WriteString(s string) (n int, err error) {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
-	return sb.buf.WriteString(s)
+	sb.writeLocked([]byte(s))
+	return len(s), nil
+}
+
+// ensureLimits fills in the default window for a zero-value syncBuffer. Without
+// it a syncBuffer{} constructed outside newSyncBuffer has headLimit and
+// tailLimit of 0 and silently discards every byte written to it.
+func (sb *syncBuffer) ensureLimits() {
+	if sb.headLimit <= 0 && sb.tailLimit <= 0 {
+		sb.headLimit = defaultSyncBufferHeadBytes
+		sb.tailLimit = defaultSyncBufferTailBytes
+	}
+}
+
+func (sb *syncBuffer) writeLocked(p []byte) {
+	if len(p) == 0 {
+		return
+	}
+	sb.ensureLimits()
+	sb.total += int64(len(p))
+
+	if len(sb.head) < sb.headLimit {
+		need := sb.headLimit - len(sb.head)
+		if len(p) <= need {
+			sb.head = append(sb.head, p...)
+			return
+		}
+		sb.head = append(sb.head, p[:need]...)
+		p = p[need:]
+	}
+	if len(p) == 0 || sb.tailLimit <= 0 {
+		if len(p) > 0 {
+			sb.truncated = true
+		}
+		return
+	}
+
+	if sb.tail == nil {
+		sb.tail = make([]byte, sb.tailLimit)
+	}
+
+	// Keep only the last tailLimit bytes of everything past the head, writing
+	// into a fixed ring so nothing is allocated or re-copied per write.
+	if len(p) >= sb.tailLimit {
+		// Prior tail content (if any) is fully superseded by this write.
+		if sb.tailLen > 0 {
+			sb.truncated = true
+		}
+		copy(sb.tail, p[len(p)-sb.tailLimit:])
+		sb.tailStart = 0
+		sb.tailLen = sb.tailLimit
+	} else {
+		w := (sb.tailStart + sb.tailLen) % sb.tailLimit
+		n := copy(sb.tail[w:], p)
+		if n < len(p) {
+			copy(sb.tail, p[n:])
+		}
+		if sb.tailLen+len(p) > sb.tailLimit {
+			// The write wrapped past the oldest byte; advance the start.
+			over := sb.tailLen + len(p) - sb.tailLimit
+			sb.tailStart = (sb.tailStart + over) % sb.tailLimit
+			sb.tailLen = sb.tailLimit
+			sb.truncated = true
+		} else {
+			sb.tailLen += len(p)
+		}
+	}
+	// Marker only when the retained window is smaller than total written.
+	if sb.total > int64(len(sb.head)+sb.tailLen) {
+		sb.truncated = true
+	}
+}
+
+// tailSegments returns the retained tail as up to two slices, oldest first.
+func (sb *syncBuffer) tailSegments() ([]byte, []byte) {
+	if sb.tailLen == 0 {
+		return nil, nil
+	}
+	end := sb.tailStart + sb.tailLen
+	if end <= sb.tailLimit {
+		return sb.tail[sb.tailStart:end], nil
+	}
+	return sb.tail[sb.tailStart:sb.tailLimit], sb.tail[:end-sb.tailLimit]
+}
+
+// trimPartialRuneSuffix drops a trailing byte sequence that is the start of a
+// multi-byte rune the truncation point cut in half. Without it the head ends
+// mid-rune and renders as U+FFFD.
+func trimPartialRuneSuffix(b []byte) []byte {
+	for i := len(b) - 1; i >= 0 && i >= len(b)-utf8.UTFMax; i-- {
+		if !utf8.RuneStart(b[i]) {
+			continue
+		}
+		if r, size := utf8.DecodeRune(b[i:]); r == utf8.RuneError && size <= 1 {
+			return b[:i]
+		}
+		return b
+	}
+	return b
+}
+
+// trimPartialRunePrefix drops leading continuation bytes left behind when the
+// truncation point cut a multi-byte rune in half.
+func trimPartialRunePrefix(b []byte) []byte {
+	for i := 0; i < len(b) && i < utf8.UTFMax; i++ {
+		if utf8.RuneStart(b[i]) {
+			return b[i:]
+		}
+	}
+	return b
 }
 
 func (sb *syncBuffer) String() string {
 	sb.mu.RLock()
 	defer sb.mu.RUnlock()
-	return sb.buf.String()
+
+	head := sb.head
+	t1, t2 := sb.tailSegments()
+
+	// Only trim rune fragments at boundaries the truncation actually cut. An
+	// untruncated stream is returned byte-for-byte, including trailing bytes of
+	// a rune whose remainder simply has not been written yet.
+	if sb.truncated {
+		head = trimPartialRuneSuffix(head)
+		if len(t1) > 0 {
+			t1 = trimPartialRunePrefix(t1)
+		} else {
+			t2 = trimPartialRunePrefix(t2)
+		}
+	}
+
+	tailLen := len(t1) + len(t2)
+	omitted := sb.total - int64(len(head)) - int64(tailLen)
+	if omitted < 0 {
+		omitted = 0
+	}
+
+	var b strings.Builder
+	if omitted == 0 {
+		b.Grow(len(head) + tailLen)
+		b.Write(head)
+		b.Write(t1)
+		b.Write(t2)
+		return b.String()
+	}
+	b.Grow(len(head) + tailLen + 64)
+	b.Write(head)
+	fmt.Fprintf(&b, "\n\n... [%d bytes truncated] ...\n\n", omitted)
+	b.Write(t1)
+	b.Write(t2)
+	return b.String()
 }
 
 // BackgroundShell represents a shell running in the background.
@@ -50,6 +229,7 @@ type BackgroundShell struct {
 	Description string
 	Shell       *Shell
 	WorkingDir  string
+	StartedAt   time.Time // When the shell was started (zero if internal)
 	ctx         context.Context
 	cancel      context.CancelFunc
 	stdout      *syncBuffer
@@ -106,11 +286,12 @@ func (m *BackgroundShellManager) Start(ctx context.Context, workingDir string, b
 		Command:     command,
 		Description: description,
 		WorkingDir:  workingDir,
+		StartedAt:   time.Now(),
 		Shell:       shell,
 		ctx:         shellCtx,
 		cancel:      cancel,
-		stdout:      &syncBuffer{},
-		stderr:      &syncBuffer{},
+		stdout:      newSyncBuffer(),
+		stderr:      newSyncBuffer(),
 		done:        make(chan struct{}),
 	}
 
@@ -138,7 +319,7 @@ func (m *BackgroundShellManager) Get(id string) (*BackgroundShell, bool) {
 func (m *BackgroundShellManager) Remove(id string) error {
 	_, ok := m.shells.Take(id)
 	if !ok {
-		return fmt.Errorf("background shell not found: %s", id)
+		return fmt.Errorf("%w: %s", ErrBackgroundShellNotFound, id)
 	}
 	return nil
 }
@@ -147,7 +328,7 @@ func (m *BackgroundShellManager) Remove(id string) error {
 func (m *BackgroundShellManager) Kill(id string) error {
 	shell, ok := m.shells.Take(id)
 	if !ok {
-		return fmt.Errorf("background shell not found: %s", id)
+		return fmt.Errorf("%w: %s", ErrBackgroundShellNotFound, id)
 	}
 
 	shell.cancel()
@@ -169,6 +350,29 @@ func (m *BackgroundShellManager) List() []string {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+// ListJobs returns all background shells, oldest first.
+//
+// The order must be deterministic: csync.Map.Seq2 ranges over a copy of the
+// underlying Go map, so the raw iteration order is randomized per call. The
+// jobs dialog rebuilds its list from this slice while keeping the selected
+// *index*, so an unordered result both shuffles the rendered list between
+// frames and makes a kill land on a different job than the one the user
+// highlighted. StartedAt is the natural order; ID breaks ties (and orders
+// shells with a zero StartedAt) so the comparison is total.
+func (m *BackgroundShellManager) ListJobs() []*BackgroundShell {
+	jobs := make([]*BackgroundShell, 0, m.shells.Len())
+	for shell := range m.shells.Seq() {
+		jobs = append(jobs, shell)
+	}
+	slices.SortFunc(jobs, func(a, b *BackgroundShell) int {
+		if c := a.StartedAt.Compare(b.StartedAt); c != 0 {
+			return c
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+	return jobs
 }
 
 // Cleanup removes completed jobs that have been finished for more than the retention period

@@ -615,6 +615,16 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		return nil, err
 	}
 
+	// An agent whose config pins it to the small model runs its main loop on
+	// that model. sessionAgent always drives its run from largeModel (see
+	// Model() and the run path), so pinning means substituting it here.
+	// config.Agent.Model was declared but never read before this, which meant
+	// every agent — including workflow sub-agents asking for the small model —
+	// silently ran on the large one.
+	if agent.Model == config.SelectedModelTypeSmall {
+		large = small
+	}
+
 	largeProviderCfg, _ := c.cfg.Config().Providers.Get(large.ModelCfg.Provider)
 	opts := SessionAgentOptions{
 		LargeModel:           large,
@@ -691,6 +701,14 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		allTools = append(allTools, agentTool)
 	}
 
+	if slices.Contains(agent.AllowedTools, WorkflowToolName) {
+		workflowTool, err := c.workflowTool(ctx)
+		if err != nil {
+			return nil, err
+		}
+		allTools = append(allTools, workflowTool)
+	}
+
 	if slices.Contains(agent.AllowedTools, tools.AgenticFetchToolName) {
 		agenticFetchTool, err := c.agenticFetchTool(ctx, nil)
 		if err != nil {
@@ -743,7 +761,8 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 
 	// Add LSP tools if user has configured LSPs or auto_lsp is enabled (nil or true).
 	if len(c.cfg.Config().LSP) > 0 || c.cfg.Config().Options.AutoLSP == nil || *c.cfg.Config().Options.AutoLSP {
-		allTools = append(allTools,
+		allTools = append(
+			allTools,
 			tools.NewDiagnosticsTool(c.lspManager),
 			tools.NewReferencesTool(c.lspManager),
 			tools.NewLSPRestartTool(c.lspManager),
