@@ -2,6 +2,7 @@ package workspace_test
 
 import (
 	"context"
+	"os"
 	"slices"
 	"testing"
 
@@ -10,6 +11,24 @@ import (
 	"github.com/charmbracelet/crush/internal/workspace"
 	"github.com/stretchr/testify/require"
 )
+
+// dataDir returns a scratch directory for the workspace database whose
+// removal is best-effort.
+//
+// t.TempDir() cannot be used: this harness deliberately leaves the created
+// workspace running for the lifetime of the process (there is no teardown
+// hook that closes the backend's app), so its sqlite handle on crush.db is
+// still open at cleanup time. POSIX unlinks an open file happily; Windows
+// refuses, and t.TempDir() turns that refusal into a test failure —
+// "TempDir RemoveAll cleanup: ...\\crush.db: The process cannot access the
+// file because it is being used by another process" on windows-latest.
+func dataDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "crush-jobs-*")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
 
 // startJobs registers n real background shells in the process-global
 // registry and removes them again afterwards. In production that registry
@@ -68,7 +87,7 @@ func TestClientWorkspace_ListAndKillBackgroundJobsOverHTTP(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	wsProto, err := c.CreateWorkspace(ctx, proto.Workspace{Path: cwd, DataDir: t.TempDir()})
+	wsProto, err := c.CreateWorkspace(ctx, proto.Workspace{Path: cwd, DataDir: dataDir(t)})
 	require.NoError(t, err)
 	ws := workspace.NewClientWorkspace(c, *wsProto)
 
@@ -117,7 +136,7 @@ func TestClientWorkspace_KillUnknownBackgroundJobIs404(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	wsProto, err := c.CreateWorkspace(ctx, proto.Workspace{Path: cwd, DataDir: t.TempDir()})
+	wsProto, err := c.CreateWorkspace(ctx, proto.Workspace{Path: cwd, DataDir: dataDir(t)})
 	require.NoError(t, err)
 	ws := workspace.NewClientWorkspace(c, *wsProto)
 
