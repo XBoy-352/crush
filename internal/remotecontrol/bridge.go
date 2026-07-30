@@ -222,11 +222,22 @@ func (b *Bridge) ensureConnected(ctx context.Context) error {
 		OnRequestSnapshot: b.onRequestSnapshot,
 	})
 
-	connCtx, cancel := context.WithCancel(context.Background())
-	if err := client.Connect(ctx); err != nil {
-		cancel()
+	// Bound only dial/login. Socket lifetime is owned by b.cancel → Close.
+	dialCtx := ctx
+	var dialCancel context.CancelFunc
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		dialCtx, dialCancel = context.WithTimeout(ctx, 20*time.Second)
+		defer dialCancel()
+	}
+	if err := client.Connect(dialCtx); err != nil {
 		return err
 	}
+
+	lifeCtx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-lifeCtx.Done()
+		_ = client.Close()
+	}()
 
 	b.mu.Lock()
 	// If another goroutine won the race, drop this connection.
@@ -241,8 +252,6 @@ func (b *Bridge) ensureConnected(ctx context.Context) error {
 	}
 	b.client = client
 	b.cancel = cancel
-	// Keep connCtx alive for watchContext inside client via cancel only.
-	_ = connCtx
 	b.mu.Unlock()
 	return nil
 }

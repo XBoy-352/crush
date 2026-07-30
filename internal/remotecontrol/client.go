@@ -130,7 +130,8 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	go c.readLoop()
 	go c.pingLoop(ws)
-	go c.watchContext(ctx)
+	// Do not watch ctx here: callers often pass a short dial timeout.
+	// Lifetime is owned by Close() (bridge cancel).
 
 	return nil
 }
