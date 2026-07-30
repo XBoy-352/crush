@@ -75,6 +75,9 @@ var copilotResponsesModels = map[string]bool{
 	"gpt-5.4-mini":  true,
 	"gpt-5.5":       true,
 	"gpt-5-mini":    true,
+	"gpt-5.6-luna":  true,
+	"gpt-5.6-terra": true,
+	"gpt-5.6-sol":   true,
 }
 
 // OpenCode models that user Anthropic Messages API instead of Chat Completions.
@@ -553,7 +556,7 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 
 		case string(catwalk.InferenceProviderBaseten):
 			extraBody["chat_template_args"] = map[string]any{
-				"enable_thinking": model.ModelCfg.Think || reasoningEffort != "",
+				"enable_thinking": model.ModelCfg.Think || reasoningEffort != "" && reasoningEffort != "none",
 			}
 
 		case string(catwalk.InferenceProviderOpenCodeGo), string(catwalk.InferenceProviderOpenCodeZen):
@@ -610,6 +613,16 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 	large, small, err := c.buildAgentModels(ctx, isSubAgent)
 	if err != nil {
 		return nil, err
+	}
+
+	// An agent whose config pins it to the small model runs its main loop on
+	// that model. sessionAgent always drives its run from largeModel (see
+	// Model() and the run path), so pinning means substituting it here.
+	// config.Agent.Model was declared but never read before this, which meant
+	// every agent — including workflow sub-agents asking for the small model —
+	// silently ran on the large one.
+	if agent.Model == config.SelectedModelTypeSmall {
+		large = small
 	}
 
 	largeProviderCfg, _ := c.cfg.Config().Providers.Get(large.ModelCfg.Provider)
@@ -686,6 +699,14 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 			return nil, err
 		}
 		allTools = append(allTools, agentTool)
+	}
+
+	if slices.Contains(agent.AllowedTools, WorkflowToolName) {
+		workflowTool, err := c.workflowTool(ctx)
+		if err != nil {
+			return nil, err
+		}
+		allTools = append(allTools, workflowTool)
 	}
 
 	if slices.Contains(agent.AllowedTools, tools.AgenticFetchToolName) {

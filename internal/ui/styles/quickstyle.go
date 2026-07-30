@@ -809,6 +809,7 @@ func quickStyle(o quickStyleOpts) Styles {
 	s.Resource.BusyIcon = s.Resource.OfflineIcon.Foreground(o.busy)
 	s.Resource.ErrorIcon = s.Resource.OfflineIcon.Foreground(o.destructive)
 	s.Resource.OnlineIcon = s.Resource.OfflineIcon.Foreground(o.successMostSubtle)
+	s.Resource.NeedsAuthIcon = s.Resource.OfflineIcon.Foreground(o.info)
 	s.Resource.DisabledIcon = lipgloss.NewStyle().Foreground(o.fgMoreSubtle).SetString("●")
 	s.Resource.AdditionalText = lipgloss.NewStyle().Foreground(o.fgMostSubtle)
 	s.Resource.CapabilityCount = lipgloss.NewStyle().Foreground(o.fgMostSubtle)
@@ -944,6 +945,7 @@ func quickStyle(o quickStyleOpts) Styles {
 
 	// Dialog.Quit
 	s.Dialog.Quit.Content = lipgloss.NewStyle().Foreground(o.fgBase)
+	s.Dialog.Quit.Hint = lipgloss.NewStyle().Foreground(o.fgMostSubtle)
 	s.Dialog.Quit.Frame = lipgloss.NewStyle().BorderForeground(o.primary).Border(lipgloss.RoundedBorder()).Padding(1, 2)
 
 	// Dialog.Revert

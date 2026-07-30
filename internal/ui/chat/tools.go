@@ -247,6 +247,8 @@ func NewToolMessageItem(
 		item = NewDiagnosticsToolMessageItem(sty, toolCall, result, canceled)
 	case agent.AgentToolName:
 		item = NewAgentToolMessageItem(sty, toolCall, result, canceled)
+	case agent.WorkflowToolName:
+		item = NewWorkflowToolMessageItem(sty, toolCall, result, canceled)
 	case tools.AgenticFetchToolName:
 		item = NewAgenticFetchToolMessageItem(sty, toolCall, result, canceled)
 	case tools.WebFetchToolName:
@@ -649,7 +651,9 @@ func toolHeader(sty *styles.Styles, status ToolStatus, name string, width int, o
 
 // toolOutputPlainContent renders plain text with optional expansion support.
 func toolOutputPlainContent(sty *styles.Styles, content string, width int, expanded bool) string {
-	content = common.RemapANSI16(stringext.NormalizeSpace(content), sty.ANSI)
+	content = stringext.NormalizeSpace(content)
+	content = common.StripCursorControl(content)
+	content = common.RemapANSI16(content, sty.ANSI)
 	lines := strings.Split(content, "\n")
 
 	maxLines := responseContextHeight
@@ -1283,6 +1287,11 @@ func (t *baseToolMessageItem) formatParametersForCopy() string {
 		if json.Unmarshal([]byte(t.toolCall.Input), &params) == nil {
 			return fmt.Sprintf("**Task:**\n%s", params.Prompt)
 		}
+	case agent.WorkflowToolName:
+		var params agent.WorkflowParams
+		if json.Unmarshal([]byte(t.toolCall.Input), &params) == nil {
+			return fmt.Sprintf("**Description:** %s\n```lua\n%s\n```", params.Description, params.Script)
+		}
 	}
 
 	var params map[string]any
@@ -1331,7 +1340,7 @@ func (t *baseToolMessageItem) formatResultForCopy() string {
 		return t.formatAgenticFetchResultForCopy()
 	case tools.WebFetchToolName:
 		return t.formatWebFetchResultForCopy()
-	case agent.AgentToolName:
+	case agent.AgentToolName, agent.WorkflowToolName:
 		return t.formatAgentResultForCopy()
 	case tools.DownloadToolName, tools.GrepToolName, tools.GlobToolName, tools.LSToolName, tools.SourcegraphToolName, tools.DiagnosticsToolName, tools.TodosToolName:
 		return fmt.Sprintf("```\n%s\n```", t.result.Content)
@@ -1651,6 +1660,8 @@ func prettifyToolName(name string) string {
 	switch name {
 	case agent.AgentToolName:
 		return "Agent"
+	case agent.WorkflowToolName:
+		return "Workflow"
 	case tools.BashToolName:
 		return "Bash"
 	case tools.JobOutputToolName:

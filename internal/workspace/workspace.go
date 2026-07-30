@@ -6,11 +6,13 @@ package workspace
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/catwalk/pkg/catwalk"
 	mcptools "github.com/charmbracelet/crush/internal/agent/tools/mcp"
+	"github.com/charmbracelet/crush/internal/commands"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/lsp"
@@ -21,6 +23,19 @@ import (
 	"github.com/charmbracelet/crush/internal/question"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/skills"
+)
+
+// Reasons the coder agent may be unavailable, returned by
+// Workspace.AgentReadyErr so callers can tell a genuinely
+// uninitialized agent apart from a lost server connection.
+var (
+	// ErrAgentNotInitialized means the workspace exists but its coder
+	// agent has not been configured/initialized (e.g. no model set).
+	ErrAgentNotInitialized = errors.New("coder agent is not initialized")
+	// ErrServerUnreachable means the client could not reach the server
+	// to determine the agent's status (server down, or the workspace was
+	// torn down out from under the client).
+	ErrServerUnreachable = errors.New("lost connection to the crush server")
 )
 
 // LSPClientInfo holds information about an LSP client's state. This is
@@ -86,10 +101,38 @@ type Workspace interface {
 	AgentRun(ctx context.Context, sessionID, prompt string, attachments ...message.Attachment) error
 	AgentRunShellCommand(ctx context.Context, sessionID, command string, termWidth int, onProgress func(string), isFirstMessage bool) (proto.ShellCommandResponse, error)
 	AgentCancel(sessionID string)
+	// AgentBackgroundForegroundTools releases bash tools that are still
+	// blocking the agent turn so they continue as background jobs (Ctrl+B).
+	// Returns how many foreground waits were released.
+	AgentBackgroundForegroundTools(sessionID string) int
+	// AgentHasForegroundWaits reports whether the session has bash tools
+	// that can be manually backgrounded.
+	AgentHasForegroundWaits(sessionID string) bool
+
+	// Background jobs
+	//
+	// The background shell registry lives in the *agent* process, which is
+	// a different process from the TUI under CRUSH_CLIENT_SERVER=1. Both
+	// calls therefore go through the workspace like every other agent
+	// operation; reading shell.GetBackgroundShellManager() from the UI
+	// would see a permanently empty registry in client mode.
+	//
+	// ListBackgroundJobs returns the jobs oldest first. It never returns
+	// output: see proto.BackgroundJob.
+	ListBackgroundJobs(ctx context.Context) ([]proto.BackgroundJob, error)
+	// KillBackgroundJob terminates one job by ID.
+	KillBackgroundJob(ctx context.Context, jobID string) error
 	AgentIsBusy() bool
 	AgentIsSessionBusy(sessionID string) bool
 	AgentModel() AgentModel
 	AgentIsReady() bool
+	// AgentReadyErr reports nil when the coder agent is ready to accept
+	// work, or a descriptive error otherwise: ErrAgentNotInitialized
+	// when the agent simply isn't set up, or ErrServerUnreachable
+	// (wrapped) when the client could not reach the server to find out.
+	// It lets the UI show an actionable message instead of collapsing
+	// both cases into "agent offline".
+	AgentReadyErr() error
 	AgentQueuedPrompts(sessionID string) int
 	AgentQueuedPromptsList(sessionID string) []string
 	AgentClearQueue(sessionID string)
@@ -169,9 +212,13 @@ type Workspace interface {
 	MCPRefreshResources(ctx context.Context, name string)
 	RefreshMCPTools(ctx context.Context, name string)
 	ReadMCPResource(ctx context.Context, name, uri string) ([]MCPResourceContents, error)
+	ListMCPPrompts(ctx context.Context) ([]commands.MCPPrompt, error)
 	GetMCPPrompt(clientID, promptID string, args map[string]string) (string, error)
 	EnableDockerMCP(ctx context.Context) error
 	DisableDockerMCP() error
+	MCPAuthenticate(ctx context.Context, name string) error
+	MCPPendingAuth() []mcptools.PendingAuthServer
+	MCPAuthURL(name string) string
 
 	// Events
 	Subscribe(program *tea.Program)

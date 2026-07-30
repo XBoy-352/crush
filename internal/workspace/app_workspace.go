@@ -164,6 +164,33 @@ func (w *AppWorkspace) AgentCancel(sessionID string) {
 	}
 }
 
+func (w *AppWorkspace) AgentBackgroundForegroundTools(sessionID string) int {
+	return shell.ReleaseForegroundWaits(sessionID)
+}
+
+func (w *AppWorkspace) AgentHasForegroundWaits(sessionID string) bool {
+	return shell.HasForegroundWaits(sessionID)
+}
+
+func (w *AppWorkspace) ListBackgroundJobs(context.Context) ([]proto.BackgroundJob, error) {
+	shells := shell.GetBackgroundShellManager().ListJobs()
+	jobs := make([]proto.BackgroundJob, 0, len(shells))
+	for _, s := range shells {
+		jobs = append(jobs, proto.BackgroundJob{
+			ID:          s.ID,
+			Command:     s.Command,
+			Description: s.Description,
+			StartedAt:   s.StartedAt,
+			Done:        s.IsDone(),
+		})
+	}
+	return jobs, nil
+}
+
+func (w *AppWorkspace) KillBackgroundJob(_ context.Context, jobID string) error {
+	return shell.GetBackgroundShellManager().Kill(jobID)
+}
+
 func (w *AppWorkspace) AgentIsBusy() bool {
 	if w.app.AgentCoordinator == nil {
 		return false
@@ -191,6 +218,13 @@ func (w *AppWorkspace) AgentModel() AgentModel {
 
 func (w *AppWorkspace) AgentIsReady() bool {
 	return w.app.AgentCoordinator != nil
+}
+
+func (w *AppWorkspace) AgentReadyErr() error {
+	if w.app.AgentCoordinator == nil {
+		return ErrAgentNotInitialized
+	}
+	return nil
 }
 
 func (w *AppWorkspace) AgentQueuedPrompts(sessionID string) int {
@@ -480,6 +514,10 @@ func (w *AppWorkspace) ReadMCPResource(ctx context.Context, name, uri string) ([
 	return result, nil
 }
 
+func (w *AppWorkspace) ListMCPPrompts(context.Context) ([]commands.MCPPrompt, error) {
+	return commands.LoadMCPPrompts()
+}
+
 func (w *AppWorkspace) GetMCPPrompt(clientID, promptID string, args map[string]string) (string, error) {
 	return commands.GetMCPPrompt(w.store, clientID, promptID, args)
 }
@@ -510,6 +548,18 @@ func (w *AppWorkspace) DisableDockerMCP() error {
 		return fmt.Errorf("failed to disable docker MCP: %w", err)
 	}
 	return w.store.DisableDockerMCP()
+}
+
+func (w *AppWorkspace) MCPAuthenticate(ctx context.Context, name string) error {
+	return mcptools.AuthenticateMCP(ctx, w.store, name)
+}
+
+func (w *AppWorkspace) MCPPendingAuth() []mcptools.PendingAuthServer {
+	return mcptools.PendingAuthMCPs(w.store)
+}
+
+func (w *AppWorkspace) MCPAuthURL(name string) string {
+	return mcptools.MCPAuthURL(name)
 }
 
 // -- Lifecycle --
