@@ -102,9 +102,15 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 
 	dialer := websocket.Dialer{HandshakeTimeout: c.loginTimeout}
-	ws, _, err := dialer.DialContext(ctx, wsURL, nil)
+	ws, resp, err := dialer.DialContext(ctx, wsURL, nil)
 	if err != nil {
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
 		return fmt.Errorf("remote control websocket dial: %w", err)
+	}
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
 	}
 
 	ws.SetReadLimit(c.maxMessageSize)
