@@ -138,9 +138,11 @@ const listChildSessions = `-- name: ListChildSessions :many
 SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos
 FROM sessions
 WHERE parent_session_id = ?
-ORDER BY created_at ASC
+ORDER BY created_at ASC, rowid ASC
 `
 
+// created_at is second-precision, so siblings created within the same second
+// would otherwise come back in undefined order. Tie-break on insertion order.
 func (q *Queries) ListChildSessions(ctx context.Context, parentSessionID sql.NullString) ([]Session, error) {
 	rows, err := q.query(ctx, q.listChildSessionsStmt, listChildSessions, parentSessionID)
 	if err != nil {
