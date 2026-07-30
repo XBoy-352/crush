@@ -235,26 +235,9 @@ func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID st
 		return nil, fmt.Errorf("failed to wait for MCP initialization: %w", err)
 	}
 
-	if promptHooks := c.cfg.Config().Hooks[hooks.EventUserPromptSubmit]; len(promptHooks) > 0 {
-		runner := hooks.NewRunner(promptHooks, c.cfg.WorkingDir(), c.cfg.WorkingDir())
-		agg, herr := runner.RunEvent(ctx, hooks.EventInput{
-			Event:     hooks.EventUserPromptSubmit,
-			SessionID: sessionID,
-			Prompt:    prompt,
-		})
-		if herr != nil {
-			slog.Warn("UserPromptSubmit hook error, proceeding", "error", herr)
-		}
-		if agg.Decision == hooks.DecisionDeny || agg.Halt {
-			reason := cmp.Or(agg.Reason, "blocked by hook")
-			return nil, fmt.Errorf("prompt blocked by hook: %s", reason)
-		}
-		if agg.UpdatedPrompt != "" {
-			prompt = agg.UpdatedPrompt
-		}
-		if agg.Context != "" {
-			prompt += "\n\n<hook-context>\n" + agg.Context + "\n</hook-context>"
-		}
+	prompt, err := c.applyUserPromptSubmitHooks(ctx, sessionID, prompt)
+	if err != nil {
+		return nil, err
 	}
 
 	// refresh models before each run
@@ -717,6 +700,36 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 	})
 
 	return result, nil
+}
+
+// applyUserPromptSubmitHooks runs UserPromptSubmit hooks and returns the
+// (possibly rewritten) prompt. Deny/halt become a hard error so the model
+// never sees a blocked prompt.
+func (c *coordinator) applyUserPromptSubmitHooks(ctx context.Context, sessionID, prompt string) (string, error) {
+	promptHooks := c.cfg.Config().Hooks[hooks.EventUserPromptSubmit]
+	if len(promptHooks) == 0 {
+		return prompt, nil
+	}
+	runner := hooks.NewRunner(promptHooks, c.cfg.WorkingDir(), c.cfg.WorkingDir())
+	agg, herr := runner.RunEvent(ctx, hooks.EventInput{
+		Event:     hooks.EventUserPromptSubmit,
+		SessionID: sessionID,
+		Prompt:    prompt,
+	})
+	if herr != nil {
+		slog.Warn("UserPromptSubmit hook error, proceeding", "error", herr)
+	}
+	if agg.Decision == hooks.DecisionDeny || agg.Halt {
+		reason := cmp.Or(agg.Reason, "blocked by hook")
+		return "", fmt.Errorf("prompt blocked by hook: %s", reason)
+	}
+	if agg.UpdatedPrompt != "" {
+		prompt = agg.UpdatedPrompt
+	}
+	if agg.Context != "" {
+		prompt += "\n\n<hook-context>\n" + agg.Context + "\n</hook-context>"
+	}
+	return prompt, nil
 }
 
 func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubAgent bool) ([]fantasy.AgentTool, error) {
