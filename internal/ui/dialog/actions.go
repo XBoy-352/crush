@@ -116,6 +116,10 @@ type (
 		MessageID      string
 		MessageContent string
 	}
+	// ActionKillJob is a message to kill a background job.
+	ActionKillJob struct {
+		ShellID string
+	}
 )
 
 // Messages for MCP OAuth authentication dialog.
@@ -138,6 +142,18 @@ type (
 	ActionMCPAuthErrored struct {
 		Name  string
 		Error error
+	}
+)
+
+// Messages for the memory inspect dialog.
+type (
+	// ActionOpenMemory is sent when a memory is selected for opening.
+	ActionOpenMemory struct {
+		Slug string
+	}
+	// ActionDeleteMemory is sent when a memory is deleted from the dialog.
+	ActionDeleteMemory struct {
+		Slug string
 	}
 )
 

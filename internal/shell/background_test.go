@@ -2,10 +2,13 @@ package shell
 
 import (
 	"context"
+	"fmt"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 )
@@ -327,4 +330,289 @@ func TestBackgroundShell_WaitContext_Canceled(t *testing.T) {
 	cancel()
 
 	require.False(t, bgShell.WaitContext(ctx))
+}
+
+// TestBackgroundShellManager_ListJobsIsDeterministic pins that ListJobs
+// returns a stable, oldest-first order.
+//
+// csync.Map.Seq2 ranges over a copy of the backing Go map, so an unsorted
+// ListJobs returns a fresh random permutation on every call (measured: 5
+// distinct orders in 8 consecutive calls with 6 jobs). The jobs dialog calls
+// ListJobs from refresh() and hands the result to list.SetItems, which keeps
+// the selected *index* — so a shuffle both reorders the rendered list and
+// makes ctrl+x kill whichever job randomly landed under the cursor instead
+// of the one the user highlighted.
+//
+// 20 jobs inserted in a shuffled order: well past the n=12 threshold below
+// which Go's pdqsort falls back to insertion sort, and far too many for a
+// random permutation to match the sorted order by chance.
+func TestBackgroundShellManager_ListJobsIsDeterministic(t *testing.T) {
+	t.Parallel()
+
+	const n = 20
+	manager := newBackgroundShellManager()
+	base := time.Now()
+	// Insert in an order unrelated to StartedAt so a no-op sort cannot pass.
+	for _, i := range []int{7, 3, 19, 0, 12, 5, 17, 1, 9, 14, 2, 18, 6, 11, 4, 16, 8, 13, 10, 15} {
+		id := fmt.Sprintf("%03X", i+1)
+		manager.shells.Set(id, &BackgroundShell{
+			ID:        id,
+			Command:   "job " + id,
+			StartedAt: base.Add(time.Duration(i) * time.Second),
+		})
+	}
+
+	want := make([]string, 0, n)
+	for i := range n {
+		want = append(want, fmt.Sprintf("%03X", i+1))
+	}
+
+	// Repeat: a single call could coincidentally come back sorted.
+	for range 20 {
+		got := make([]string, 0, n)
+		for _, job := range manager.ListJobs() {
+			got = append(got, job.ID)
+		}
+		require.Equal(t, want, got,
+			"ListJobs must be deterministic and oldest-first; a shuffled list makes the jobs dialog kill the wrong job")
+	}
+}
+
+// TestBackgroundShellManager_ListJobsOrdersZeroStartedAtByID covers the tie
+// path: shells with no StartedAt must still come back in a stable order
+// rather than a random one.
+func TestBackgroundShellManager_ListJobsOrdersZeroStartedAtByID(t *testing.T) {
+	t.Parallel()
+
+	manager := newBackgroundShellManager()
+	for _, id := range []string{"00E", "003", "011", "001", "00A", "007", "013", "005", "00C", "009", "002", "012", "006", "00B", "004", "010", "008", "00D", "00F"} {
+		manager.shells.Set(id, &BackgroundShell{ID: id})
+	}
+
+	first := make([]string, 0, 19)
+	for _, job := range manager.ListJobs() {
+		first = append(first, job.ID)
+	}
+	require.True(t, slices.IsSorted(first), "tied StartedAt must fall back to ID order, got %v", first)
+	for range 20 {
+		got := make([]string, 0, 19)
+		for _, job := range manager.ListJobs() {
+			got = append(got, job.ID)
+		}
+		require.Equal(t, first, got, "ListJobs order must not change between calls")
+	}
+}
+
+func TestSyncBufferUnderCap(t *testing.T) {
+	t.Parallel()
+	sb := &syncBuffer{headLimit: 64, tailLimit: 64}
+	input := []byte("hello world")
+	n, err := sb.Write(input)
+	require.NoError(t, err)
+	require.Equal(t, len(input), n)
+	require.Equal(t, string(input), sb.String())
+	require.False(t, sb.truncated)
+}
+
+func TestSyncBufferExactBoundary(t *testing.T) {
+	t.Parallel()
+	sb := &syncBuffer{headLimit: 8, tailLimit: 8}
+	input := []byte("HEADHEADTAILTAIL") // 16 bytes
+	n, err := sb.Write(input)
+	require.NoError(t, err)
+	require.Equal(t, len(input), n)
+	require.Equal(t, string(input), sb.String())
+	require.NotContains(t, sb.String(), "truncated")
+}
+
+func TestSyncBufferOverCapSingleWrite(t *testing.T) {
+	t.Parallel()
+	const head, tail = 32, 32
+	sb := &syncBuffer{headLimit: head, tailLimit: tail}
+	// 200 bytes: first 32 head, last 32 tail, middle truncated
+	input := make([]byte, 200)
+	for i := range input {
+		input[i] = byte('A' + i%26)
+	}
+	// mark head/tail regions uniquely
+	copy(input[:4], []byte("HEAD"))
+	copy(input[len(input)-4:], []byte("TAIL"))
+
+	n, err := sb.Write(input)
+	require.NoError(t, err)
+	require.Equal(t, len(input), n)
+
+	out := sb.String()
+	require.True(t, strings.HasPrefix(out, string(input[:head])))
+	require.True(t, strings.HasSuffix(out, string(input[len(input)-tail:])))
+	require.Contains(t, out, "bytes truncated")
+	require.LessOrEqual(t, len(out), head+tail+80)
+	require.True(t, sb.truncated)
+}
+
+func TestSyncBufferManySmallWrites(t *testing.T) {
+	t.Parallel()
+	const head, tail = 64, 64
+	sb := &syncBuffer{headLimit: head, tailLimit: tail}
+	var full []byte
+	for i := range 300 {
+		chunk := []byte{byte('a' + i%26)}
+		full = append(full, chunk...)
+		n, err := sb.Write(chunk)
+		require.NoError(t, err)
+		require.Equal(t, 1, n)
+	}
+	out := sb.String()
+	require.True(t, strings.HasPrefix(out, string(full[:head])))
+	require.True(t, strings.HasSuffix(out, string(full[len(full)-tail:])))
+	require.Contains(t, out, "bytes truncated")
+	require.LessOrEqual(t, len(out), head+tail+80)
+}
+
+func TestSyncBufferWriteString(t *testing.T) {
+	t.Parallel()
+	sb := &syncBuffer{headLimit: 8, tailLimit: 8}
+	n, err := sb.WriteString("abcdefghijklmnopqr") // 18
+	require.NoError(t, err)
+	require.Equal(t, 18, n)
+	out := sb.String()
+	require.True(t, strings.HasPrefix(out, "abcdefgh"))
+	require.True(t, strings.HasSuffix(out, "ijklmnopqr"[len("ijklmnopqr")-8:]))
+	require.Contains(t, out, "bytes truncated")
+}
+
+func TestSyncBufferHeapBounded(t *testing.T) {
+	// No t.Parallel: this reads process-global runtime.MemStats, so any other
+	// test allocating concurrently lands inside the measurement window.
+	sb := newSyncBuffer()  // 1 MiB + 1 MiB
+	const total = 32 << 20 // 32 MiB
+	const chunk = 64 << 10
+	payload := make([]byte, chunk)
+	for i := range payload {
+		payload[i] = 'x'
+	}
+
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	written := 0
+	for written < total {
+		n, err := sb.Write(payload)
+		require.NoError(t, err)
+		require.Equal(t, len(payload), n)
+		written += n
+	}
+
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+
+	out := sb.String()
+	require.Contains(t, out, "bytes truncated")
+
+	// The deterministic invariant: whatever the process heap did, the buffer
+	// itself retains at most head+tail regardless of how much was written.
+	require.LessOrEqual(t, len(sb.head), defaultSyncBufferHeadBytes)
+	require.LessOrEqual(t, sb.tailLen, defaultSyncBufferTailBytes)
+	require.LessOrEqual(t, cap(sb.tail), defaultSyncBufferTailBytes)
+	require.Equal(t, int64(total), sb.total)
+
+	// Retained payload is ~2 MiB; allow generous overhead under GC noise.
+	growth := int64(after.HeapAlloc) - int64(before.HeapAlloc)
+	if growth < 0 {
+		growth = 0
+	}
+	require.Less(t, growth, int64(8<<20), "heap grew by %d bytes after writing %d", growth, total)
+	require.LessOrEqual(t, len(out), defaultSyncBufferHeadBytes+defaultSyncBufferTailBytes+128)
+}
+
+// TestSyncBufferTailWritesDoNotAllocate pins the tail to a fixed ring. A tail
+// that is re-sliced per write allocates and copies tailLimit bytes on every
+// write while holding the write lock, so draining a noisy child costs
+// O(total output) rather than O(1) amortized.
+func TestSyncBufferTailWritesDoNotAllocate(t *testing.T) {
+	// No t.Parallel: testing.AllocsPerRun panics in a parallel test.
+	sb := newSyncBuffer()
+	chunk := make([]byte, 32<<10)
+	// Fill the head and saturate the tail so every measured write takes the
+	// steady-state path.
+	for range 128 {
+		sb.Write(chunk)
+	}
+	allocs := testing.AllocsPerRun(200, func() {
+		sb.Write(chunk)
+	})
+	require.Zero(t, allocs, "steady-state tail write must not allocate, got %v allocs/op", allocs)
+	require.True(t, sb.truncated)
+	require.Equal(t, defaultSyncBufferTailBytes, sb.tailLen)
+}
+
+// TestSyncBufferSteadyStateDoesNotCreep asserts the retained window converges to
+// the documented bound instead of growing slowly forever, and that both the head
+// and the tail content actually survive (a one-sided length bound would also
+// pass on an empty buffer).
+func TestSyncBufferSteadyStateDoesNotCreep(t *testing.T) {
+	// No t.Parallel: this allocates heavily and would otherwise land inside
+	// TestSyncBufferHeapBounded's process-global MemStats window.
+	const head, tail = 64, 64
+	sb := &syncBuffer{headLimit: head, tailLimit: tail}
+	first := strings.Repeat("H", head)
+	sb.WriteString(first)
+	for i := range 200000 {
+		sb.WriteString(string(rune('a' + i%26)))
+	}
+	require.Equal(t, head, len(sb.head))
+	require.Equal(t, tail, sb.tailLen)
+	require.Equal(t, tail, len(sb.tail), "ring must stay exactly tailLimit bytes")
+
+	// Cap holds AND content survived, in both directions.
+	out := sb.String()
+	require.True(t, strings.HasPrefix(out, first), "head content lost")
+	require.LessOrEqual(t, len(out), head+tail+64)
+	require.Greater(t, len(out), head+tail)
+	require.Equal(t, 1, strings.Count(out, "bytes truncated"), "elision marker duplicated or lost")
+
+	// The marker must account for exactly what was dropped.
+	var reported int64
+	_, err := fmt.Sscanf(out[strings.Index(out, "["):], "[%d bytes truncated]", &reported)
+	require.NoError(t, err)
+	require.Equal(t, sb.total-int64(head+tail), reported)
+}
+
+// TestSyncBufferDoesNotSplitRunes guards the head and tail truncation points
+// against cutting a multi-byte rune in half, which renders as U+FFFD. PR #10
+// shipped exactly this bug in addLog.
+func TestSyncBufferDoesNotSplitRunes(t *testing.T) {
+	t.Parallel()
+	// headLimit 9 puts the boundary inside the 3-byte rune at offset 8;
+	// tailLimit 8 puts the tail boundary inside a 3-byte rune too.
+	sb := &syncBuffer{headLimit: 9, tailLimit: 8}
+	sb.WriteString("abcdefgh世界" + strings.Repeat("Q", 12) + "世界世")
+	out := sb.String()
+
+	require.True(t, utf8.ValidString(out), "truncated output must remain valid UTF-8: %q", out)
+	require.NotContains(t, out, string(utf8.RuneError), "truncation produced U+FFFD")
+	require.True(t, strings.HasPrefix(out, "abcdefgh"), "head content lost")
+	require.True(t, strings.HasSuffix(out, "界世"), "tail content lost: %q", out)
+
+	// Accounting stays exact after trimming the rune fragments.
+	var reported int64
+	_, err := fmt.Sscanf(out[strings.Index(out, "["):], "[%d bytes truncated]", &reported)
+	require.NoError(t, err)
+	visible := int64(len(out)) - int64(len(fmt.Sprintf("\n\n... [%d bytes truncated] ...\n\n", reported)))
+	require.Equal(t, sb.total, visible+reported, "marker must account for every dropped byte")
+}
+
+// TestSyncBufferZeroValueRetainsOutput guards against a syncBuffer constructed
+// outside newSyncBuffer silently discarding every byte, which a zero headLimit
+// and tailLimit would otherwise cause.
+func TestSyncBufferZeroValueRetainsOutput(t *testing.T) {
+	t.Parallel()
+	var sb syncBuffer
+	const msg = "this output must not vanish"
+	n, err := sb.WriteString(msg)
+	require.NoError(t, err)
+	require.Equal(t, len(msg), n)
+	require.Equal(t, msg, sb.String())
+	require.False(t, sb.truncated)
 }
