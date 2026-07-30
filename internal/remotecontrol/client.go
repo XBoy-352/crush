@@ -326,14 +326,6 @@ func (c *Client) login(ctx context.Context) (string, error) {
 	return lResp.Token, nil
 }
 
-func (c *Client) watchContext(ctx context.Context) {
-	select {
-	case <-ctx.Done():
-		_ = c.Close()
-	case <-c.closeCh:
-	}
-}
-
 func (c *Client) pingLoop(ws *websocket.Conn) {
 	ticker := time.NewTicker(c.pingPeriod)
 	defer ticker.Stop()
