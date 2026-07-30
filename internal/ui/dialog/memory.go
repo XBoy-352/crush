@@ -1,15 +1,19 @@
 package dialog
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/list"
 	"github.com/charmbracelet/crush/internal/ui/styles"
@@ -28,8 +32,8 @@ const (
 	memoryModeDeleting
 )
 
-// memoryEntry holds one memory file's metadata for the dialog list.
-type memoryEntry struct {
+// MemoryEntry holds one memory file's metadata for the dialog list.
+type MemoryEntry struct {
 	slug        string
 	description string
 	size        int64
@@ -43,7 +47,7 @@ type Memory struct {
 	help       help.Model
 	list       *list.FilterableList
 	input      textinput.Model
-	entries    []memoryEntry
+	entries    []MemoryEntry
 	memoryMode memoryMode
 	memoryDir  string
 
@@ -61,8 +65,10 @@ type Memory struct {
 
 var _ Dialog = (*Memory)(nil)
 
-// NewMemory creates a new Memory dialog by scanning the memory directory.
-func NewMemory(com *common.Common) (*Memory, error) {
+// NewMemory creates a new Memory dialog from an already-scanned entry list.
+// The caller scans off the Update loop (see ScanMemoryDir) because reading
+// every memory file is disk I/O and Update must never block on it.
+func NewMemory(com *common.Common, entries []MemoryEntry) (*Memory, error) {
 	m := &Memory{
 		com:        com,
 		memoryMode: memoryModeNormal,
@@ -70,15 +76,6 @@ func NewMemory(com *common.Common) (*Memory, error) {
 
 	dataDir := com.Config().Options.DataDirectory
 	m.memoryDir = filepath.Join(dataDir, "memory")
-
-	entries, err := scanMemoryDir(m.memoryDir)
-	if err != nil {
-		// Non-existent directory is not an error; it's just empty.
-		if !os.IsNotExist(err) {
-			return nil, err
-		}
-		entries = nil
-	}
 	m.entries = entries
 
 	help := help.New()
@@ -261,7 +258,7 @@ func (m *Memory) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	return cur
 }
 
-func (m *Memory) selectedEntry() *memoryEntry {
+func (m *Memory) selectedEntry() *MemoryEntry {
 	if item := m.list.SelectedItem(); item != nil {
 		if mi, ok := item.(*MemoryItem); ok {
 			// Walk entries to find by slug.
@@ -282,22 +279,20 @@ func (m *Memory) confirmDelete() Action {
 		return nil
 	}
 
-	// Remove the file.
-	if err := os.Remove(entry.path); err != nil {
+	// Delete through the tool's locked writer. Doing the remove and the
+	// index rebuild here would race a concurrent agent-side memory_write,
+	// and whichever rename landed last would silently discard the other's
+	// index update.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := tools.DeleteMemory(ctx, m.com.Config().Options.DataDirectory, entry.slug); err != nil {
 		return ActionCmd{Cmd: func() tea.Msg {
 			return util.NewErrorMsg(fmt.Errorf("delete memory %s: %w", entry.slug, err))
 		}}
 	}
 
-	// Regenerate MEMORY.md so the index stays in sync.
-	if err := rebuildMemoryIndex(m.memoryDir); err != nil {
-		return ActionCmd{Cmd: func() tea.Msg {
-			return util.NewErrorMsg(fmt.Errorf("rebuild memory index: %w", err))
-		}}
-	}
-
 	// Remove from entries slice.
-	var remaining []memoryEntry
+	var remaining []MemoryEntry
 	for _, e := range m.entries {
 		if e.slug != entry.slug {
 			remaining = append(remaining, e)
@@ -308,14 +303,19 @@ func (m *Memory) confirmDelete() Action {
 	return ActionDeleteMemory{Slug: entry.slug}
 }
 
-// scanMemoryDir reads the memory directory and returns sorted entries.
-func scanMemoryDir(memoryDir string) ([]memoryEntry, error) {
+// ScanMemoryDir reads the memory directory and returns entries sorted by
+// slug. It returns no error for a missing directory: that is just an empty
+// memory store. Call it from a tea.Cmd, never from Update.
+func ScanMemoryDir(memoryDir string) ([]MemoryEntry, error) {
 	entries, err := os.ReadDir(memoryDir)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
 		return nil, err
 	}
 
-	var mems []memoryEntry
+	var mems []MemoryEntry
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -334,8 +334,8 @@ func scanMemoryDir(memoryDir string) ([]memoryEntry, error) {
 		if err != nil {
 			return nil, err
 		}
-		desc := extractMemoryDescription(string(b), slug)
-		mems = append(mems, memoryEntry{
+		desc := tools.ExtractMemoryDescription(string(b), slug)
+		mems = append(mems, MemoryEntry{
 			slug:        slug,
 			description: desc,
 			size:        fi.Size(),
@@ -343,112 +343,10 @@ func scanMemoryDir(memoryDir string) ([]memoryEntry, error) {
 		})
 	}
 
-	// Sort by slug.
-	for i := 0; i < len(mems); i++ {
-		for j := i + 1; j < len(mems); j++ {
-			if mems[j].slug < mems[i].slug {
-				mems[i], mems[j] = mems[j], mems[i]
-			}
-		}
-	}
+	slices.SortFunc(mems, func(a, b MemoryEntry) int {
+		return strings.Compare(a.slug, b.slug)
+	})
 	return mems, nil
-}
-
-// rebuildMemoryIndex rescans the memory directory and atomically rewrites
-// MEMORY.md so the index stays in sync after UI-side deletes.
-func rebuildMemoryIndex(memoryDir string) error {
-	entries, err := os.ReadDir(memoryDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-
-	var lines []string
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if name == "MEMORY.md" || !strings.HasSuffix(name, ".md") {
-			continue
-		}
-		slug := strings.TrimSuffix(name, ".md")
-		b, err := os.ReadFile(filepath.Join(memoryDir, name))
-		if err != nil {
-			return err
-		}
-		desc := extractMemoryDescription(string(b), slug)
-		lines = append(lines, slug+": "+desc)
-	}
-
-	// Sort lines by slug (already sorted by scan, but be safe).
-	for i := 0; i < len(lines); i++ {
-		for j := i + 1; j < len(lines); j++ {
-			if lines[j] < lines[i] {
-				lines[i], lines[j] = lines[j], lines[i]
-			}
-		}
-	}
-
-	var sb strings.Builder
-	sb.WriteString("# Memory index\n\n")
-	for _, line := range lines {
-		fmt.Fprintf(&sb, "- %s\n", line)
-	}
-
-	return atomicWriteFile(filepath.Join(memoryDir, "MEMORY.md"), []byte(sb.String()), 0o644)
-}
-
-// atomicWriteFile writes data to path atomically by writing to a temporary
-// file in the same directory and renaming it into place.
-func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	f, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := f.Chmod(perm); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, path)
-}
-
-// extractMemoryDescription returns the description from frontmatter,
-// or the slug as fallback. Duplicated from agent/tools to avoid
-// importing that package from the UI layer.
-func extractMemoryDescription(content, slug string) string {
-	lines := strings.Split(content, "\n")
-	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
-		return slug
-	}
-	for i := 1; i < len(lines); i++ {
-		line := lines[i]
-		if strings.TrimSpace(line) == "---" {
-			break
-		}
-		if after, ok := strings.CutPrefix(line, "description:"); ok {
-			desc := strings.TrimSpace(after)
-			if desc != "" {
-				return desc
-			}
-			break
-		}
-	}
-	return slug
 }
 
 // MemoryItem implements list.FilterableItem for a memory entry.
@@ -536,7 +434,7 @@ func (mi *MemoryItem) action() Action {
 }
 
 // memoryItems builds a slice of FilterableItem from memory entries.
-func memoryItems(t *styles.Styles, mode memoryMode, entries ...memoryEntry) []list.FilterableItem {
+func memoryItems(t *styles.Styles, mode memoryMode, entries ...MemoryEntry) []list.FilterableItem {
 	items := make([]list.FilterableItem, 0, len(entries))
 	for _, e := range entries {
 		sizeText := formatSize(e.size)

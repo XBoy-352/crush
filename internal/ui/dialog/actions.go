@@ -149,7 +149,6 @@ type (
 type (
 	// ActionOpenMemory is sent when a memory is selected for opening.
 	ActionOpenMemory struct {
-		Path string
 		Slug string
 	}
 	// ActionDeleteMemory is sent when a memory is deleted from the dialog.

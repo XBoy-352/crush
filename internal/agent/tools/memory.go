@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -152,22 +153,11 @@ func NewMemoryTool(dataDir string) fantasy.AgentTool {
 				)), nil
 
 			case "delete":
-				// Lock so concurrent writers don't regenerate a stale index.
-				release, err := lockMemoryDir(ctx, dataDir)
-				if err != nil {
-					return fantasy.ToolResponse{}, fmt.Errorf("acquire memory lock: %w", err)
-				}
-				defer release()
-
-				if err := os.Remove(path); err != nil {
-					if os.IsNotExist(err) {
+				if err := DeleteMemory(ctx, dataDir, params.Name); err != nil {
+					if errors.Is(err, ErrMemoryNotFound) {
 						return fantasy.NewTextErrorResponse(fmt.Sprintf("no memory named %s", params.Name)), nil
 					}
-					return fantasy.ToolResponse{}, fmt.Errorf("delete memory file: %w", err)
-				}
-
-				if err := regenerateMemoryIndex(memoryDir); err != nil {
-					return fantasy.ToolResponse{}, fmt.Errorf("regenerate memory index: %w", err)
+					return fantasy.ToolResponse{}, err
 				}
 
 				return fantasy.NewTextResponse(fmt.Sprintf(`Deleted memory "%s".`, params.Name)), nil
@@ -176,6 +166,60 @@ func NewMemoryTool(dataDir string) fantasy.AgentTool {
 			return fantasy.NewTextErrorResponse("action must be save or delete"), nil
 		},
 	)
+}
+
+// ErrMemoryNotFound is returned by DeleteMemory when no such memory exists.
+var ErrMemoryNotFound = errors.New("memory not found")
+
+// DeleteMemory removes a memory and regenerates MEMORY.md under the memory
+// directory lock. It is the ONLY supported way to delete a memory: the UI
+// dialog and the memory_write tool both go through it so that a UI-side
+// delete cannot race a tool-side save and lose an index update. dataDir is
+// the project data directory (Options.DataDirectory).
+func DeleteMemory(ctx context.Context, dataDir, slug string) error {
+	if !memoryNameRe.MatchString(slug) {
+		return fmt.Errorf("invalid memory name %q", slug)
+	}
+	memoryDir := filepath.Join(dataDir, "memory")
+
+	release, err := lockMemoryDir(ctx, dataDir)
+	if err != nil {
+		return fmt.Errorf("acquire memory lock: %w", err)
+	}
+	defer release()
+
+	if err := os.Remove(filepath.Join(memoryDir, slug+".md")); err != nil {
+		if os.IsNotExist(err) {
+			return ErrMemoryNotFound
+		}
+		return fmt.Errorf("delete memory file: %w", err)
+	}
+	if err := regenerateMemoryIndex(memoryDir); err != nil {
+		return fmt.Errorf("regenerate memory index: %w", err)
+	}
+	return nil
+}
+
+// RegenerateMemoryIndex rebuilds MEMORY.md from a directory scan under the
+// memory directory lock. Used after a memory file is edited out of band (for
+// example in the user's $EDITOR from the memory dialog), where the
+// description in the frontmatter may have changed but the index still shows
+// the old one.
+func RegenerateMemoryIndex(ctx context.Context, dataDir string) error {
+	release, err := lockMemoryDir(ctx, dataDir)
+	if err != nil {
+		return fmt.Errorf("acquire memory lock: %w", err)
+	}
+	defer release()
+	return regenerateMemoryIndex(filepath.Join(dataDir, "memory"))
+}
+
+// ExtractMemoryDescription returns the description: frontmatter value of a
+// memory file body, or slug when there is no parseable frontmatter. Exported
+// so the memory dialog renders descriptions with the same parser that builds
+// the index, rather than a second copy that can drift from it.
+func ExtractMemoryDescription(content, slug string) string {
+	return extractMemoryDescription(content, slug)
 }
 
 func formatMemoryFile(description, content string) string {
@@ -218,7 +262,26 @@ func writeMemoryIndex(memoryDir, index string) error {
 	if index == "" {
 		return nil
 	}
+	index = clampMemoryIndex(index)
 	return atomicWriteFile(filepath.Join(memoryDir, memoryIndexFileName), []byte(index), 0o644)
+}
+
+// clampMemoryIndex trims index to whole lines within MaxMemoryIndexBytes.
+// The save path rejects an over-budget index outright, but delete and
+// rollback regenerate the index unconditionally, and a memory directory
+// populated out of band (by the write tool, by hand, or by an older build)
+// can hold far more than maxMemoryFiles entries. Without this, deleting one
+// memory from a 100k-entry directory writes a multi-megabyte MEMORY.md that
+// the prompt layer can only read the first 16 KiB of anyway.
+func clampMemoryIndex(index string) string {
+	if len(index) <= MaxMemoryIndexBytes {
+		return index
+	}
+	cut := index[:MaxMemoryIndexBytes]
+	if i := strings.LastIndexByte(cut, '\n'); i >= 0 {
+		cut = cut[:i+1]
+	}
+	return cut
 }
 
 // renderMemoryIndex builds the MEMORY.md body from a directory scan without
