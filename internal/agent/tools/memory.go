@@ -389,5 +389,39 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := renameWithRetry(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// renameRetries bounds the rename retry loop. Kept small and finite: a
+// contended rename must not turn into an unbounded wait.
+const (
+	renameRetries = 20
+	renameBackoff = 25 * time.Millisecond
+)
+
+// renameWithRetry renames tmp over path, retrying briefly on failure.
+//
+// On POSIX the rename succeeds first time and this is a plain os.Rename. On
+// Windows it can fail with ERROR_ACCESS_DENIED while another handle has the
+// destination open, which is exactly the case atomicWriteFile exists to
+// serve: the prompt layer reads MEMORY.md at launch while the agent may be
+// rewriting it. Without a retry that surfaces to the user as a failed
+// memory_write ("write memory file: ... Access is denied") even though
+// nothing is wrong. Bounded at renameRetries*renameBackoff, after which the
+// original error is returned.
+func renameWithRetry(tmp, path string) error {
+	var err error
+	for i := range renameRetries {
+		if err = os.Rename(tmp, path); err == nil {
+			return nil
+		}
+		if i < renameRetries-1 {
+			time.Sleep(renameBackoff)
+		}
+	}
+	return err
 }

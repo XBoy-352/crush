@@ -158,3 +158,23 @@ func TestRegenerateMemoryIndexStaysWithinPromptBudget(t *testing.T) {
 		"the clamped index must end on a line boundary, got tail %q",
 		string(written[max(0, len(written)-40):]))
 }
+
+// TestRenameWithRetryGivesUpAndReturnsTheError pins the retry bound. A
+// contended rename must not become an unbounded wait, and a rename that can
+// never succeed must surface its error rather than spin.
+func TestRenameWithRetryGivesUpAndReturnsTheError(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	require.NoError(t, os.WriteFile(src, []byte("x"), 0o644))
+	// Destination directory does not exist, so the rename can never succeed.
+	dst := filepath.Join(dir, "no-such-dir", "dst")
+
+	start := time.Now()
+	err := renameWithRetry(src, dst)
+	elapsed := time.Since(start)
+
+	require.Error(t, err, "an impossible rename must return its error")
+	upper := time.Duration(renameRetries) * renameBackoff * 4
+	require.Less(t, elapsed, upper,
+		"renameWithRetry took %s; the retry loop must stay bounded", elapsed)
+}
