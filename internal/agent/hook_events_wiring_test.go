@@ -2,8 +2,10 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"charm.land/catwalk/pkg/catwalk"
@@ -138,7 +140,7 @@ func TestApplyUserPromptSubmitHooksDeny(t *testing.T) {
 func TestBuildToolsWiresPostToolUseHooks(t *testing.T) {
 	t.Parallel()
 	marker := filepath.Join(t.TempDir(), "post-fired")
-	cmd := "touch " + marker
+	cmd := fmt.Sprintf("touch %s", quoteShellPath(marker))
 	coord, _ := hookEventsCoordinator(t)
 	coord.cfg.Config().Hooks = map[string][]config.HookConfig{
 		hooks.EventPostToolUse: {{Command: cmd}},

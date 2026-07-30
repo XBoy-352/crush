@@ -2,8 +2,10 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,7 +44,7 @@ func TestCancelDoesNotBlockOnStopHookForDroppedQueuedPrompts(t *testing.T) {
 	t.Cleanup(broker.Shutdown)
 
 	marker := filepath.Join(t.TempDir(), "stop-fired")
-	sa := stopHookAgent(t, env, "touch "+marker+"; sleep 100", broker)
+	sa := stopHookAgent(t, env, fmt.Sprintf("touch %s; sleep 100", quoteShellPath(marker)), broker)
 
 	sess, err := env.sessions.Create(t.Context(), "session")
 	require.NoError(t, err)
@@ -110,11 +112,18 @@ func TestStopHookFiresOnCleanCompletion(t *testing.T) {
 	t.Cleanup(broker.Shutdown)
 
 	marker := filepath.Join(t.TempDir(), "stop-fired")
-	sa := stopHookAgent(t, env, "touch "+marker, broker)
+	sa := stopHookAgent(t, env, fmt.Sprintf("touch %s", quoteShellPath(marker)), broker)
 
 	sa.publishRunComplete(t.Context(), SessionAgentCall{SessionID: "s1", RunID: "r1"},
 		notify.RunComplete{SessionID: "s1", RunID: "r1"})
 
 	_, statErr := os.Stat(marker)
 	require.NoError(t, statErr, "Stop must fire when a real turn ends")
+}
+
+// quoteShellPath single-quotes a path for the embedded POSIX shell.
+// Windows temp paths contain backslashes that the shell would otherwise
+// treat as escapes, so the marker never appears and the test fails.
+func quoteShellPath(path string) string {
+	return "'" + strings.ReplaceAll(filepath.ToSlash(path), "'", `'"'"'`) + "'"
 }
