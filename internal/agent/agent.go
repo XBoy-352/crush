@@ -1518,12 +1518,6 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		return err
 	}
 
-	summaryMessage.AddFinish(message.FinishReasonEndTurn, "", "")
-	err = a.messages.Update(genCtx, summaryMessage)
-	if err != nil {
-		return err
-	}
-
 	var openrouterCost *float64
 	for _, step := range resp.Steps {
 		stepCost := a.openrouterCost(step.ProviderMetadata)
@@ -1535,6 +1529,22 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 			openrouterCost = &newCost
 		}
 		extractHyperCredits(step.ProviderMetadata)
+	}
+
+	// Record the summarization usage on the summary message itself, using the
+	// same figures that are about to be added to session.Cost below. A plain
+	// AddFinish here would leave summarization spend on the session row but
+	// invisible to `session show --by-model`, so the breakdown could never
+	// reconcile on an auto-summarized session.
+	summaryPromptTok, summaryCompletionTok := stepUsageTokens(resp.TotalUsage)
+	summaryMessage.AddFinishWithUsage(
+		message.FinishReasonEndTurn, "", "",
+		summaryPromptTok, summaryCompletionTok,
+		stepUsageCost(largeModel, resp.TotalUsage, openrouterCost, false),
+	)
+	err = a.messages.Update(genCtx, summaryMessage)
+	if err != nil {
+		return err
 	}
 
 	a.updateSessionUsage(largeModel, &currentSession, resp.TotalUsage, openrouterCost, false)
@@ -2038,24 +2048,16 @@ func (a *sessionAgent) GenerateTitle(ctx context.Context, sessionID string, user
 		extractHyperCredits(step.ProviderMetadata)
 	}
 
-	modelConfig := model.CatwalkCfg
-	cost := modelConfig.CostPer1MInCached/1e6*float64(resp.TotalUsage.CacheCreationTokens) +
-		modelConfig.CostPer1MOutCached/1e6*float64(resp.TotalUsage.CacheReadTokens) +
-		modelConfig.CostPer1MIn/1e6*float64(resp.TotalUsage.InputTokens) +
-		modelConfig.CostPer1MOut/1e6*float64(resp.TotalUsage.OutputTokens)
+	cost := stepUsageCost(model, resp.TotalUsage, openrouterCost, false)
+	promptTokens, completionTokens := stepUsageTokens(resp.TotalUsage)
 
-	// Use override cost if available (e.g., from OpenRouter).
-	if openrouterCost != nil {
-		cost = *openrouterCost
-	}
-
-	// Skip cost accumulation
-	if model.FlatRate {
-		cost = 0
-	}
-
-	promptTokens := resp.TotalUsage.InputTokens + resp.TotalUsage.CacheCreationTokens
-	completionTokens := resp.TotalUsage.OutputTokens
+	// Record the title generation's usage against the model that incurred it.
+	// UpdateTitleAndUsage below adds the money to the PARENT session's cost
+	// column, so without a per-model record of it the spend would be
+	// unattributable and `session show --by-model` could never reconcile: title
+	// generation runs on the first prompt of every session, and it may run on
+	// the small model or fall back to the large one.
+	a.recordTitleUsage(ctx, sessionID, model, promptTokens, completionTokens, cost)
 
 	// Atomically update only title and usage fields to avoid overriding other
 	// concurrent session updates.
@@ -2065,6 +2067,43 @@ func (a *sessionAgent) GenerateTitle(ctx context.Context, sessionID string, user
 		return
 	}
 	titleSaved = true
+}
+
+// recordTitleUsage persists the title generation's token and cost usage as an
+// assistant message in the session's dedicated title sub-session, so the spend
+// is attributable to the model that actually incurred it.
+//
+// The parent keeps the money on its own cost column (see the
+// UpdateTitleAndUsage call in GenerateTitle) exactly as sub-agent cost is
+// propagated upward, and this sub-session carries the record that makes the
+// two reconcile. Failures are logged and swallowed: a title is not worth
+// failing a turn over.
+func (a *sessionAgent) recordTitleUsage(ctx context.Context, sessionID string, model Model, promptTokens, completionTokens int64, cost float64) {
+	titleSession, err := a.sessions.CreateTitleSession(ctx, sessionID)
+	if err != nil {
+		slog.Warn("Failed to create title session for usage accounting", "session_id", sessionID, "error", err)
+		return
+	}
+	msg, err := a.messages.Create(ctx, titleSession.ID, message.CreateMessageParams{
+		Role:     message.Assistant,
+		Model:    model.ModelCfg.Model,
+		Provider: model.ModelCfg.Provider,
+	})
+	if err != nil {
+		slog.Warn("Failed to record title usage message", "session_id", sessionID, "error", err)
+		return
+	}
+	msg.AddFinishWithUsage(message.FinishReasonEndTurn, "", "", promptTokens, completionTokens, cost)
+	if err := a.messages.Update(ctx, msg); err != nil {
+		slog.Warn("Failed to save title usage message", "session_id", sessionID, "error", err)
+		return
+	}
+	titleSession.Cost = cost
+	titleSession.PromptTokens = promptTokens
+	titleSession.CompletionTokens = completionTokens
+	if _, err := a.sessions.Save(ctx, titleSession); err != nil {
+		slog.Warn("Failed to save title session usage", "session_id", sessionID, "error", err)
+	}
 }
 
 func (a *sessionAgent) openrouterCost(metadata fantasy.ProviderMetadata) *float64 {
@@ -2137,11 +2176,20 @@ func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session,
 	updateSessionTokenCounters(session, usage)
 }
 
+// updateSessionTokenCounters overwrites (does not accumulate) the session row's
+// token counters. They track the CONTEXT OCCUPANCY of the latest step, which is
+// what the auto-summarize StopWhen condition, the header context gauge and the
+// sidebar all read them as; Summarize resets PromptTokens to 0 for the same
+// reason. They are therefore NOT a per-turn total and must never be compared
+// with the per-model breakdown, which sums each step's usage.
+//
+// The prompt figure counts every token the provider had to read for the step,
+// cache-creation included, so it matches stepUsageTokens.
 func updateSessionTokenCounters(session *session.Session, usage fantasy.Usage) {
 	if usage.OutputTokens != 0 {
 		session.CompletionTokens = usage.OutputTokens
 	}
-	if promptTokens := usage.InputTokens + usage.CacheReadTokens; promptTokens != 0 {
+	if promptTokens, _ := stepUsageTokens(usage); promptTokens != 0 {
 		session.PromptTokens = promptTokens
 	}
 }
