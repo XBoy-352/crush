@@ -4,7 +4,6 @@ import "charm.land/bubbles/v2/key"
 
 type KeyMap struct {
 	Editor struct {
-		AddFile     key.Binding
 		SendMessage key.Binding
 		OpenEditor  key.Binding
 		Newline     key.Binding
@@ -27,6 +26,7 @@ type KeyMap struct {
 		NewSession     key.Binding
 		AddAttachment  key.Binding
 		Cancel         key.Binding
+		Background     key.Binding
 		Tab            key.Binding
 		Details        key.Binding
 		TogglePills    key.Binding
@@ -50,6 +50,8 @@ type KeyMap struct {
 		Revert         key.Binding
 		ScrollLeft     key.Binding
 		ScrollRight    key.Binding
+		FocusSidebar   key.Binding
+		FocusChat      key.Binding
 	}
 
 	Initialize struct {
@@ -68,6 +70,7 @@ type KeyMap struct {
 	Sessions   key.Binding
 	Tab        key.Binding
 	ToggleYolo key.Binding
+	TogglePlan key.Binding
 }
 
 func DefaultKeyMap() KeyMap {
@@ -104,12 +107,12 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("ctrl+y"),
 			key.WithHelp("ctrl+y", "toggle yolo"),
 		),
+		TogglePlan: key.NewBinding(
+			key.WithKeys("shift+tab"),
+			key.WithHelp("shift+tab", "toggle plan mode"),
+		),
 	}
 
-	km.Editor.AddFile = key.NewBinding(
-		key.WithKeys("/"),
-		key.WithHelp("/", "add file"),
-	)
 	km.Editor.SendMessage = key.NewBinding(
 		key.WithKeys("enter"),
 		key.WithHelp("enter", "send"),
@@ -171,6 +174,10 @@ func DefaultKeyMap() KeyMap {
 	km.Chat.Cancel = key.NewBinding(
 		key.WithKeys("esc", "alt+esc"),
 		key.WithHelp("esc", "cancel"),
+	)
+	km.Chat.Background = key.NewBinding(
+		key.WithKeys("ctrl+b"),
+		key.WithHelp("ctrl+b", "background tools"),
 	)
 	km.Chat.Tab = key.NewBinding(
 		key.WithKeys("tab"),
@@ -264,6 +271,14 @@ func DefaultKeyMap() KeyMap {
 	km.Chat.ScrollRight = key.NewBinding(
 		key.WithKeys("shift+right", "L"),
 		key.WithHelp("shift+→/L", "scroll right"),
+	)
+	km.Chat.FocusSidebar = key.NewBinding(
+		key.WithKeys("l", "right"),
+		key.WithHelp("l/→", "focus sidebar"),
+	)
+	km.Chat.FocusChat = key.NewBinding(
+		key.WithKeys("h", "left"),
+		key.WithHelp("h/←", "focus chat"),
 	)
 	km.Initialize.Yes = key.NewBinding(
 		key.WithKeys("y", "Y"),

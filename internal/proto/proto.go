@@ -22,6 +22,9 @@ type Workspace struct {
 	ClientID string         `json:"client_id,omitempty"`
 	Config   *config.Config `json:"config,omitempty"`
 	Env      []string       `json:"env,omitempty"`
+	// Channels lists the MCP servers opted in as channels for this workspace
+	// (from the --channels flag).
+	Channels []string `json:"channels,omitempty"`
 	// Skills carries the snapshot of skill discovery state at workspace
 	// creation time. Subsequent updates flow through the SSE event
 	// stream.
@@ -158,15 +161,35 @@ type ShellCommandResponse struct {
 	ExitCode int    `json:"exit_code"`
 }
 
+// BackgroundJob describes one background shell job as a frontend sees it.
+//
+// It deliberately carries no output. The jobs dialog lists jobs and renders
+// only ID, command, description and elapsed time; syncBuffer.String() costs a
+// full copy of the retained window per call (measured 2105698 B/op, 4
+// allocs/op at the default 2 MiB window — see BenchmarkSyncBufferString), so putting output in the list payload would
+// make every list refresh — and, over HTTP, every byte on the wire — scale
+// with the total output of every running job. Output stays behind the
+// job_output tool, which fetches exactly one job on demand.
+type BackgroundJob struct {
+	ID          string    `json:"id"`
+	Command     string    `json:"command"`
+	Description string    `json:"description,omitempty"`
+	StartedAt   time.Time `json:"started_at"`
+	Done        bool      `json:"done"`
+}
+
 // AgentSession represents a session with its busy status.
 type AgentSession struct {
 	Session
 	IsBusy bool `json:"is_busy"`
+	// HasForegroundWaits is true when bash tools are blocking the agent
+	// turn and can be manually backgrounded (Ctrl+B).
+	HasForegroundWaits bool `json:"has_foreground_waits,omitempty"`
 }
 
 // IsZero checks if the AgentSession is zero-valued.
 func (a AgentSession) IsZero() bool {
-	return a.ID == "" && !a.IsBusy
+	return a.ID == "" && !a.IsBusy && !a.HasForegroundWaits
 }
 
 // PermissionAction represents an action taken on a permission request.
@@ -204,9 +227,70 @@ type PermissionGrantResponse struct {
 	Resolved bool `json:"resolved"`
 }
 
+// QuestionRequest is the wire format for a batch question
+// sent from server to client over SSE.
+type QuestionRequest struct {
+	ID                 string         `json:"id"`
+	SessionID          string         `json:"session_id"`
+	ToolCallID         string         `json:"tool_call_id"`
+	Questions          []QuestionItem `json:"questions"`
+	ConfirmTitle       string         `json:"confirm_title,omitempty"`
+	ConfirmDescription string         `json:"confirm_description,omitempty"`
+}
+
+// QuestionItem is a single question within a batch.
+type QuestionItem struct {
+	ID          string           `json:"id"`
+	Type        string           `json:"type"`
+	Label       string           `json:"label,omitempty"`
+	Question    string           `json:"question"`
+	Description string           `json:"description,omitempty"`
+	Choices     []QuestionChoice `json:"choices,omitempty"`
+}
+
+// QuestionChoice is a selectable option.
+type QuestionChoice struct {
+	ID          string `json:"id"`
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
+}
+
+// QuestionAnswer is the wire format for answering a batch
+// question, sent from client to server via REST.
+type QuestionAnswer struct {
+	BatchRequestID string             `json:"batch_request_id"`
+	Responses      []QuestionResponse `json:"responses"`
+}
+
+// QuestionResponse is a single answer within a batch response.
+type QuestionResponse struct {
+	QuestionID  string            `json:"request_id"`
+	SelectedIDs []string          `json:"selected_ids,omitempty"`
+	FillInText  string            `json:"fill_in_text,omitempty"`
+	Yes         *bool             `json:"yes,omitempty"`
+	Notes       map[string]string `json:"notes,omitempty"`
+}
+
+// QuestionAnswerResponse is the server's response to a
+// question batch answer call.
+type QuestionAnswerResponse struct {
+	Resolved bool `json:"resolved"`
+}
+
+// QuestionNotification is published when a question batch is
+// resolved so non-answering clients can dismiss their forms.
+type QuestionNotification struct {
+	BatchID string `json:"batch_id"`
+}
+
 // PermissionSkipRequest represents a request to skip permission prompts.
 type PermissionSkipRequest struct {
 	Skip bool `json:"skip"`
+}
+
+// PermissionPlanModeRequest represents a request to set plan mode.
+type PermissionPlanModeRequest struct {
+	Enabled bool `json:"enabled"`
 }
 
 // LSPEventType represents the type of LSP event.

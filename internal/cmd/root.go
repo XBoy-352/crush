@@ -56,7 +56,9 @@ func init() {
 	rootCmd.PersistentFlags().BoolP("debug", "d", false, "Debug")
 	rootCmd.PersistentFlags().StringVarP(&clientHost, "host", "H", server.DefaultHost(), "Connect to a specific crush server host (for advanced users)")
 	rootCmd.Flags().BoolP("help", "h", false, "Help")
-	rootCmd.Flags().BoolP("yolo", "y", false, "Automatically accept all permissions (dangerous mode)")
+	rootCmd.PersistentFlags().BoolP("yolo", "y", false, "Automatically accept all permissions (dangerous mode)")
+	rootCmd.PersistentFlags().StringSlice("channels", nil, "MCP servers to enable as channels (repeatable), e.g. --channels server:webhook")
+	_ = rootCmd.PersistentFlags().MarkHidden("channels")
 	rootCmd.Flags().StringP("session", "s", "", "Continue a previous session by ID")
 	rootCmd.Flags().BoolP("continue", "C", false, "Continue the most recent session")
 	rootCmd.MarkFlagsMutuallyExclusive("session", "continue")
@@ -94,6 +96,9 @@ crush --debug --cwd /path/to/project
 
 # Run in yolo mode (auto-accept all permissions; use with care)
 crush --yolo
+
+# Non-interactive run with yolo mode
+crush run --yolo "Refactor the auth module"
 
 # Run with custom data directory
 crush --data-dir /path/to/custom/.crush
@@ -250,6 +255,7 @@ func setupWorkspace(cmd *cobra.Command) (workspace.Workspace, func(), error) {
 func setupLocalWorkspace(cmd *cobra.Command) (workspace.Workspace, func(), error) {
 	debug, _ := cmd.Flags().GetBool("debug")
 	yolo, _ := cmd.Flags().GetBool("yolo")
+	channels, _ := cmd.Flags().GetStringSlice("channels")
 	dataDir, _ := cmd.Flags().GetString("data-dir")
 	ctx := cmd.Context()
 
@@ -265,6 +271,7 @@ func setupLocalWorkspace(cmd *cobra.Command) (workspace.Workspace, func(), error
 
 	cfg := store.Config()
 	store.Overrides().SkipPermissionRequests = yolo
+	store.Overrides().EnabledChannels = channels
 
 	if err := os.MkdirAll(cfg.Options.DataDirectory, 0o700); err != nil {
 		return nil, nil, fmt.Errorf("failed to create data directory: %q %w", cfg.Options.DataDirectory, err)
@@ -372,6 +379,7 @@ func connectToServer(cmd *cobra.Command) (*client.Client, *proto.Workspace, func
 
 	debug, _ := cmd.Flags().GetBool("debug")
 	yolo, _ := cmd.Flags().GetBool("yolo")
+	channels, _ := cmd.Flags().GetStringSlice("channels")
 	dataDir, _ := cmd.Flags().GetString("data-dir")
 	ctx := cmd.Context()
 
@@ -386,12 +394,13 @@ func connectToServer(cmd *cobra.Command) (*client.Client, *proto.Workspace, func
 	}
 
 	wsReq := proto.Workspace{
-		Path:    cwd,
-		DataDir: dataDir,
-		Debug:   debug,
-		YOLO:    yolo,
-		Version: version.Version,
-		Env:     os.Environ(),
+		Path:     cwd,
+		DataDir:  dataDir,
+		Debug:    debug,
+		YOLO:     yolo,
+		Channels: channels,
+		Version:  version.Version,
+		Env:      os.Environ(),
 	}
 
 	ws, err := c.CreateWorkspace(ctx, wsReq)
