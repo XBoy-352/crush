@@ -1257,3 +1257,22 @@ func TestRetryAttemptReporterResetsPerCall(t *testing.T) {
 			"a published attempt number must never exceed the budget")
 	}
 }
+
+// TestRetryAttemptCounterResetsPerStep pins the multi-step run contract:
+// fantasy allocates a fresh MaxRetries budget per step, and Crush's
+// user-visible attempt counter must reset at PrepareStep so a recovery
+// on step N does not make step N+1 start at "attempt 5/6".
+func TestRetryAttemptCounterResetsPerStep(t *testing.T) {
+	t.Parallel()
+
+	var c retryAttemptCounter
+
+	// Step 1: fail twice, then succeed (counter would sit at 2).
+	require.Equal(t, 1, c.Next())
+	require.Equal(t, 2, c.Next())
+
+	// Step 2: PrepareStep clears the counter before any OnRetry.
+	c.Reset()
+	require.Equal(t, 1, c.Next(),
+		"a new step must publish attempt 1, not continue from the prior step")
+}
