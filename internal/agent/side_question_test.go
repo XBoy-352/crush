@@ -99,6 +99,11 @@ func TestSanitizeSideQuestionAnswer(t *testing.T) {
 			input:    "<tool_call>ls -la</tool_call>Finished",
 			expected: "Finished",
 		},
+		{
+			name:     "strips orphan intro before tool call",
+			input:    "Let me check actual progress:\n<|DSML|tool_calls><||DSML||invoke name=\"bash\"><||DSML||parameter name=\"command\" string=\"true\">ls</||DSML||parameter></||DSML||invoke></|DSML|tool_calls>",
+			expected: "",
+		},
 	}
 
 	for _, tt := range tests {

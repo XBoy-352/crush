@@ -96,6 +96,7 @@ var (
 	dsmlTagRegex        = regexp.MustCompile(`(?s)<\|+DSML\|+.*?>.*?</\|+DSML\|+.*?>`)
 	orphanDsmlTagRegex  = regexp.MustCompile(`</?\|+DSML\|+.*?>`)
 	toolCallTagRegex    = regexp.MustCompile(`(?s)<(?:tool_call|function_call)>.*?</(?:tool_call|function_call)>`)
+	orphanIntroRegex    = regexp.MustCompile(`(?i)^(?:let me check|checking|running).*?:\s*$`)
 )
 
 type SessionAgentCall struct {
@@ -2028,6 +2029,8 @@ func sanitizeSideQuestionAnswer(ans string) string {
 	ans = dsmlTagRegex.ReplaceAllString(ans, "")
 	ans = orphanDsmlTagRegex.ReplaceAllString(ans, "")
 	ans = toolCallTagRegex.ReplaceAllString(ans, "")
+	ans = strings.TrimSpace(ans)
+	ans = orphanIntroRegex.ReplaceAllString(ans, "")
 	return strings.TrimSpace(ans)
 }
 
