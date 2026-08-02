@@ -89,10 +89,13 @@ var sideQuestionPrompt []byte
 //go:embed templates/plan_mode.md
 var planModePrompt string
 
-// Used to remove <think> tags from generated titles.
+// Used to remove <think>, DSML, and tool tags from generated outputs.
 var (
 	thinkTagRegex       = regexp.MustCompile(`(?s)<think>.*?</think>`)
 	orphanThinkTagRegex = regexp.MustCompile(`</?think>`)
+	dsmlTagRegex        = regexp.MustCompile(`(?s)<\|+DSML\|+.*?>.*?</\|+DSML\|+.*?>`)
+	orphanDsmlTagRegex  = regexp.MustCompile(`</?\|+DSML\|+.*?>`)
+	toolCallTagRegex    = regexp.MustCompile(`(?s)<(?:tool_call|function_call)>.*?</(?:tool_call|function_call)>`)
 )
 
 type SessionAgentCall struct {
@@ -2009,7 +2012,7 @@ func (a *sessionAgent) SideQuestion(ctx context.Context, sessionID, question str
 		promptTokens := res.TotalUsage.InputTokens + res.TotalUsage.CacheCreationTokens
 		completionTokens := res.TotalUsage.OutputTokens
 		return SideQuestionResult{
-			Answer:           strings.TrimSpace(res.Response.Content.Text()),
+			Answer:           sanitizeSideQuestionAnswer(res.Response.Content.Text()),
 			Model:            chosen.ModelCfg.Model,
 			Provider:         chosen.ModelCfg.Provider,
 			PromptTokens:     promptTokens,
@@ -2017,6 +2020,15 @@ func (a *sessionAgent) SideQuestion(ctx context.Context, sessionID, question str
 		}, nil
 	}
 	return SideQuestionResult{}, lastErr
+}
+
+func sanitizeSideQuestionAnswer(ans string) string {
+	ans = thinkTagRegex.ReplaceAllString(ans, "")
+	ans = orphanThinkTagRegex.ReplaceAllString(ans, "")
+	ans = dsmlTagRegex.ReplaceAllString(ans, "")
+	ans = orphanDsmlTagRegex.ReplaceAllString(ans, "")
+	ans = toolCallTagRegex.ReplaceAllString(ans, "")
+	return strings.TrimSpace(ans)
 }
 
 // GenerateTitle generates a session title based on the initial prompt.
