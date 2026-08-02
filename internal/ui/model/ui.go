@@ -228,8 +228,9 @@ type UI struct {
 	keyMap KeyMap
 	keyenh tea.KeyboardEnhancementsMsg
 
-	dialog *dialog.Overlay
-	status *Status
+	dialog        *dialog.Overlay
+	status        *Status
+	workflowPopup *dialog.WorkflowPopup
 
 	// isCanceling tracks whether the user has pressed escape once to cancel.
 	isCanceling bool
@@ -747,6 +748,8 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sessionFiles = msg.files
 		// A retry countdown belongs to the previous session; drop it.
 		m.clearRetryCountdown()
+		m.dialog.CloseDialog(dialog.WorkflowPopupID)
+		m.workflowPopup = nil
 		// Session switch: the memoized busy state and queued prompts
 		// belong to the previous session. Drop them and re-fetch
 		// off-thread so the queue pill and esc behavior track the new
@@ -4978,20 +4981,45 @@ func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
 }
 
 // handleWorkflowProgress forwards a live workflow progress event to the
-// corresponding WorkflowToolMessageItem in the chat.
+// corresponding WorkflowToolMessageItem in the chat and updates the workflow popup overlay.
 func (m *UI) handleWorkflowProgress(wp *notify.WorkflowProgress) tea.Cmd {
 	if wp == nil {
 		return nil
 	}
 	item := m.chat.MessageItem(wp.ToolCallID)
-	if item == nil {
-		return nil
+	var wf *chat.WorkflowToolMessageItem
+	if item != nil {
+		if w, ok := item.(*chat.WorkflowToolMessageItem); ok {
+			wf = w
+			wf.SetProgress(wp.Running, wp.Completed, wp.Total, wp.Index, wp.Kind, wp.Label, wp.Message)
+		}
 	}
-	wf, ok := item.(*chat.WorkflowToolMessageItem)
-	if !ok {
-		return nil
+
+	if m.workflowPopup == nil || m.workflowPopup.ToolCallID() != wp.ToolCallID {
+		m.workflowPopup = dialog.NewWorkflowPopup(m.com, wp.ToolCallID)
 	}
-	wf.SetProgress(wp.Running, wp.Completed, wp.Total, wp.Index, wp.Kind, wp.Label, wp.Message)
+
+	if wf != nil && wf.Description() != "" {
+		m.workflowPopup.SetDescription(wf.Description())
+	}
+
+	m.workflowPopup.HandleProgress(wp)
+
+	// Auto-open popup on agent start or progress if not already open or dismissed by user
+	if !m.workflowPopup.IsFinished() && !m.workflowPopup.IsDismissed() {
+		if !m.dialog.ContainsDialog(m.workflowPopup.ID()) {
+			m.dialog.OpenDialog(m.workflowPopup)
+		}
+	}
+
+	// Auto-close when workflow completes
+	if wp.Total > 0 && wp.Completed == wp.Total && wp.Running == 0 {
+		m.workflowPopup.SetFinished(true)
+		if m.dialog.ContainsDialog(m.workflowPopup.ID()) {
+			m.dialog.CloseDialog(m.workflowPopup.ID())
+		}
+	}
+
 	return nil
 }
 
