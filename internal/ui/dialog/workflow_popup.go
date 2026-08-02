@@ -299,12 +299,31 @@ func (w *WorkflowPopup) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 		rc.Title = "Workflow: " + ansi.Truncate(w.description, innerWidth-25, "…")
 	}
 
+	var validAgents []*WorkflowAgentInfo
+	for _, a := range w.agents {
+		if a != nil {
+			validAgents = append(validAgents, a)
+		}
+	}
+
+	if w.total == 0 && len(validAgents) == 0 {
+		rc.Title = "Workflow Engine (Idle)"
+		rc.TitleInfo = "0/0 done"
+		rc.AddPart(t.Dialog.SecondaryText.Render("No active workflow is currently running."))
+		rc.AddPart(t.Dialog.SecondaryText.Render("Workflows orchestrate multiple sub-agents in parallel or sequence."))
+		rc.Help = renderDialogHelp(t, &w.help, w, innerWidth)
+		view := rc.Render()
+		DrawCenter(scr, area, view)
+		return nil
+	}
+
 	elapsed := time.Since(w.startTime).Truncate(time.Second)
 	mins := int(elapsed.Minutes())
 	secs := int(elapsed.Seconds()) % 60
 	timeStr := fmt.Sprintf("%02d:%02d", mins, secs)
 
 	rc.TitleInfo = fmt.Sprintf("[%s] %d/%d done", timeStr, w.completed, w.total)
+
 
 	// Progress bar line
 	barWidth := max(10, innerWidth-28)
@@ -328,12 +347,7 @@ func (w *WorkflowPopup) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	rc.AddPart(t.Dialog.PrimaryText.Bold(true).Render("Sub-Agents:"))
 
 	maxAgentListLines := 5
-	var validAgents []*WorkflowAgentInfo
-	for _, a := range w.agents {
-		if a != nil {
-			validAgents = append(validAgents, a)
-		}
-	}
+
 
 	if len(validAgents) == 0 {
 		rc.AddPart(t.Dialog.SecondaryText.Render("  (waiting for agents to start...)"))
