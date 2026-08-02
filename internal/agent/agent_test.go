@@ -1081,7 +1081,7 @@ func TestFormatRetryStatus(t *testing.T) {
 
 	require.Equal(
 		t,
-		"Retrying in 5s (attempt 2/10) - rate limit",
+		"Retrying in 5s (9/10 retries left) - rate limit",
 		notify.FormatRetryStatus(notify.Notification{
 			Type:       notify.TypeRetry,
 			Message:    "rate limit",
@@ -1093,7 +1093,7 @@ func TestFormatRetryStatus(t *testing.T) {
 
 	require.Equal(
 		t,
-		"Retrying in 1s (attempt 1/10)",
+		"Retrying in 1s (10/10 retries left)",
 		notify.FormatRetryStatus(notify.Notification{
 			Type:       notify.TypeRetry,
 			RetryDelay: time.Second,
@@ -1105,7 +1105,7 @@ func TestFormatRetryStatus(t *testing.T) {
 	// Sub-second remainders still show as 1s so the bar never flashes 0s.
 	require.Equal(
 		t,
-		"Retrying in 1s (attempt 1/10) - overloaded",
+		"Retrying in 1s (10/10 retries left) - overloaded",
 		notify.FormatRetryStatus(notify.Notification{
 			Type:       notify.TypeRetry,
 			Message:    "overloaded",

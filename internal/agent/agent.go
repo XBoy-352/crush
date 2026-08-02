@@ -1094,7 +1094,16 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			}
 			a.publishRetry(call.SessionID, currentSession.Title, largeModel.ModelCfg.Provider, err, delay, attempt, maxRetries)
 		},
-		OnAuthRefresh: call.OnAuthRefresh,
+		OnAuthRefresh: func(callContext context.Context, err *fantasy.ProviderError) error {
+			if call.OnAuthRefresh != nil {
+				refreshErr := call.OnAuthRefresh(callContext, err)
+				if refreshErr == nil {
+					retryAttempt.Reset()
+				}
+				return refreshErr
+			}
+			return nil
+		},
 		ModelProvider: func() fantasy.LanguageModel {
 			m := a.largeModel.Get()
 			slog.Info("ModelProvider called",

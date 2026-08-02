@@ -5077,10 +5077,9 @@ func (m *UI) handleRetryTick(msg retryTickMsg) tea.Cmd {
 		return nil
 	}
 	if time.Now().After(m.retryUntil) {
-		// Backoff elapsed; keep the last frame until the next attempt
-		// either streams content (cleared in updateSessionMessage) or
-		// fails again (a new TypeRetry replaces this countdown).
-		m.applyRetryCountdown()
+		// Backoff elapsed; the next attempt is already in flight.
+		// Clear the countdown so the UI doesn't freeze on "1s" forever.
+		m.clearRetryCountdown()
 		return nil
 	}
 	m.applyRetryCountdown()
