@@ -71,7 +71,9 @@ type KeyMap struct {
 	Tab        key.Binding
 	ToggleYolo key.Binding
 	TogglePlan key.Binding
+	Workflow   key.Binding
 }
+
 
 func DefaultKeyMap() KeyMap {
 	km := KeyMap{
@@ -111,7 +113,12 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("shift+tab"),
 			key.WithHelp("shift+tab", "toggle plan mode"),
 		),
+		Workflow: key.NewBinding(
+			key.WithKeys("ctrl+w"),
+			key.WithHelp("ctrl+w", "workflow progress"),
+		),
 	}
+
 
 	km.Editor.SendMessage = key.NewBinding(
 		key.WithKeys("enter"),

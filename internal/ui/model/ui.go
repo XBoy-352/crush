@@ -2487,6 +2487,15 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				cmds = append(cmds, cmd)
 			}
 			return true
+		case key.Matches(msg, m.keyMap.Workflow):
+			if m.workflowPopup != nil && !m.workflowPopup.IsFinished() {
+				m.workflowPopup.SetDismissed(false)
+				if !m.dialog.ContainsDialog(m.workflowPopup.ID()) {
+					m.dialog.OpenDialog(m.workflowPopup)
+				}
+				return true
+			}
+
 		case key.Matches(msg, m.keyMap.Chat.Details) && m.isCompact:
 			m.detailsOpen = !m.detailsOpen
 			m.updateLayoutAndSize()
