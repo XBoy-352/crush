@@ -142,4 +142,3 @@ func TestWorkflowPopup_Draw(t *testing.T) {
 	cur := wp.Draw(scr, scr.Bounds())
 	require.Nil(t, cur)
 }
-

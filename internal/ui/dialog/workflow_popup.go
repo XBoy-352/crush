@@ -324,7 +324,6 @@ func (w *WorkflowPopup) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 
 	rc.TitleInfo = fmt.Sprintf("[%s] %d/%d done", timeStr, w.completed, w.total)
 
-
 	// Progress bar line
 	barWidth := max(10, innerWidth-28)
 	pct := 0.0
@@ -347,7 +346,6 @@ func (w *WorkflowPopup) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	rc.AddPart(t.Dialog.PrimaryText.Bold(true).Render("Sub-Agents:"))
 
 	maxAgentListLines := 5
-
 
 	if len(validAgents) == 0 {
 		rc.AddPart(t.Dialog.SecondaryText.Render("  (waiting for agents to start...)"))

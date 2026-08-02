@@ -2497,7 +2497,6 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 			}
 			return true
 
-
 		case key.Matches(msg, m.keyMap.Chat.Details) && m.isCompact:
 			m.detailsOpen = !m.detailsOpen
 			m.updateLayoutAndSize()
@@ -4572,11 +4571,29 @@ func (m *UI) openDialog(id string) tea.Cmd {
 		if cmd := m.openMemoryDialog(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+	case dialog.WorkflowPopupID:
+		if cmd := m.openWorkflowPopupDialog(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	default:
 		// Unknown dialog
 		break
 	}
 	return tea.Batch(cmds...)
+}
+
+// openWorkflowPopupDialog opens or brings to front the workflow progress popup.
+func (m *UI) openWorkflowPopupDialog() tea.Cmd {
+	if m.workflowPopup == nil {
+		m.workflowPopup = dialog.NewWorkflowPopup(m.com, "")
+	}
+	m.workflowPopup.SetDismissed(false)
+	if !m.dialog.ContainsDialog(m.workflowPopup.ID()) {
+		m.dialog.OpenDialog(m.workflowPopup)
+	} else {
+		m.dialog.BringToFront(m.workflowPopup.ID())
+	}
+	return nil
 }
 
 // openBtwDialog opens the ephemeral side-question dialog.

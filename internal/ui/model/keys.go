@@ -74,7 +74,6 @@ type KeyMap struct {
 	Workflow   key.Binding
 }
 
-
 func DefaultKeyMap() KeyMap {
 	km := KeyMap{
 		Quit: key.NewBinding(
@@ -118,7 +117,6 @@ func DefaultKeyMap() KeyMap {
 			key.WithHelp("ctrl+w", "workflow progress"),
 		),
 	}
-
 
 	km.Editor.SendMessage = key.NewBinding(
 		key.WithKeys("enter"),
