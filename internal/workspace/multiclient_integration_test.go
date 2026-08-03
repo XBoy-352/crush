@@ -50,6 +50,13 @@ func (r *runtimeServer) newClient(t *testing.T, path string) *client.Client {
 	t.Helper()
 	c, err := client.NewClient(path, "tcp", r.host)
 	require.NoError(t, err)
+	// Retire the client during cleanup so the server releases every
+	// claim it holds and tears the workspace down at once, closing the
+	// pooled DB connection. Without this a test that leaves clients
+	// attached (the SSE cache tests never shut theirs down) keeps the
+	// workspace, and its open crush.db, alive past t.TempDir cleanup,
+	// which Windows cannot remove while the file is locked.
+	t.Cleanup(func() { _ = c.RetireClient(context.Background()) })
 	return c
 }
 
