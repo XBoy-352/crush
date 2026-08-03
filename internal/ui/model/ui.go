@@ -1479,6 +1479,8 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			TTL:  ttl,
 		})
 		cmds = append(cmds, clearInfoMsgCmd(ttl))
+	case workspace.ConnectionEvent:
+		cmds = append(cmds, m.handleConnectionEvent(msg)...)
 	case util.ClearStatusMsg:
 		m.status.ClearInfoMsg()
 	case completions.CompletionItemsLoadedMsg:
@@ -1596,6 +1598,39 @@ func (m *UI) setSessionMessages(msgs []message.Message) tea.Cmd {
 	}
 	m.chat.SelectLast()
 	return tea.Sequence(cmds...)
+}
+
+// handleConnectionEvent reports the health of the client-server link and,
+// once it recovers, reloads the open session. A reload is always needed
+// after a degraded episode: events published while the stream was down are
+// gone, and if the workspace itself was re-created any run died with it.
+func (m *UI) handleConnectionEvent(msg workspace.ConnectionEvent) []tea.Cmd {
+	info := util.InfoMsg{
+		Type: util.InfoTypeWarn,
+		Msg:  "Lost connection to the Crush server — reconnecting…",
+		TTL:  30 * time.Second,
+	}
+	switch msg.State {
+	case workspace.ConnectionDegraded:
+		slog.Warn("Server connection degraded", "error", msg.Err, "stuck", msg.Stuck)
+		if msg.Stuck {
+			info.Type = util.InfoTypeError
+			info.Msg = "Can't restore the connection to the Crush server. Restart Crush to recover."
+			info.TTL = time.Minute
+		}
+	case workspace.ConnectionRecovered:
+		info = util.InfoMsg{
+			Type: util.InfoTypeSuccess,
+			Msg:  "Reconnected to the Crush server.",
+			TTL:  DefaultStatusTTL,
+		}
+	}
+	m.status.SetInfoMsg(info)
+	cmds := []tea.Cmd{clearInfoMsgCmd(info.TTL)}
+	if msg.State == workspace.ConnectionRecovered && m.session != nil {
+		cmds = append(cmds, m.loadSession(m.session.ID))
+	}
+	return cmds
 }
 
 // loadNestedToolCalls recursively loads nested tool calls for agent/agentic_fetch tools.

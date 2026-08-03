@@ -45,8 +45,8 @@ func (c *Client) CreateWorkspace(ctx context.Context, ws proto.Workspace) (*prot
 		return nil, fmt.Errorf("failed to create workspace: %w", err)
 	}
 	defer rsp.Body.Close()
-	if rsp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to create workspace: status code %d", rsp.StatusCode)
+	if err := checkStatus(rsp); err != nil {
+		return nil, fmt.Errorf("failed to create workspace: %w", err)
 	}
 	var created proto.Workspace
 	if err := json.NewDecoder(rsp.Body).Decode(&created); err != nil {
@@ -62,8 +62,8 @@ func (c *Client) GetWorkspace(ctx context.Context, id string) (*proto.Workspace,
 		return nil, fmt.Errorf("failed to get workspace: %w", err)
 	}
 	defer rsp.Body.Close()
-	if rsp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to get workspace: status code %d", rsp.StatusCode)
+	if err := checkStatus(rsp); err != nil {
+		return nil, fmt.Errorf("failed to get workspace: %w", err)
 	}
 	var ws proto.Workspace
 	if err := json.NewDecoder(rsp.Body).Decode(&ws); err != nil {
@@ -104,8 +104,8 @@ func (c *Client) SetCurrentSession(ctx context.Context, workspaceID, sessionID s
 		return fmt.Errorf("failed to set current session: %w", err)
 	}
 	defer rsp.Body.Close()
-	if rsp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to set current session: status code %d", rsp.StatusCode)
+	if err := checkStatus(rsp); err != nil {
+		return fmt.Errorf("failed to set current session: %w", err)
 	}
 	return nil
 }
@@ -124,9 +124,9 @@ func (c *Client) SubscribeEvents(ctx context.Context, id string) (<-chan any, er
 		return nil, fmt.Errorf("failed to subscribe to events: %w", err)
 	}
 
-	if rsp.StatusCode != http.StatusOK {
+	if err := checkStatus(rsp); err != nil {
 		rsp.Body.Close()
-		return nil, fmt.Errorf("failed to subscribe to events: status code %d", rsp.StatusCode)
+		return nil, fmt.Errorf("failed to subscribe to events: %w", err)
 	}
 
 	go func() {
@@ -400,8 +400,8 @@ func (c *Client) GetAgentInfo(ctx context.Context, id string) (*proto.AgentInfo,
 		return nil, fmt.Errorf("failed to get agent status: %w", err)
 	}
 	defer rsp.Body.Close()
-	if rsp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to get agent status: status code %d", rsp.StatusCode)
+	if err := checkStatus(rsp); err != nil {
+		return nil, fmt.Errorf("failed to get agent status: %w", err)
 	}
 	var info proto.AgentInfo
 	if err := json.NewDecoder(rsp.Body).Decode(&info); err != nil {
