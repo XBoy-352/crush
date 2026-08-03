@@ -342,10 +342,15 @@ func drainUntil[T any](ctx context.Context, evc <-chan any, match func(T) bool) 
 // config.Init does not read the host machine's real config.
 func TestE2E_TwoClientsReceiveSameMessage(t *testing.T) {
 	h := newRealCreateHarness(t)
-	// Shorten the create-grace window so the workspace's pending
-	// creation holds release quickly during test cleanup once both
-	// SSE streams have been detached.
+	// Shorten the lifecycle windows so the workspace's client holds
+	// release quickly during test cleanup once both SSE streams have
+	// been detached: the create grace covers the window before the
+	// streams attach, the detach grace the window after they drop.
+	// The pooled DB connection is only released once the last hold
+	// expires, and Windows cannot remove the temp data directory
+	// while that connection is still open.
 	h.backend.SetCreateGrace(200 * time.Millisecond)
+	h.backend.SetDetachGrace(200 * time.Millisecond)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
