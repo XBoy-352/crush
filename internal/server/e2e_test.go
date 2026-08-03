@@ -468,7 +468,9 @@ func TestE2E_PermissionFlowCrossClient(t *testing.T) {
 
 	// Wait for the PermissionRequest to arrive on client A's SSE
 	// stream. We need its ID to drive the grant.
-	pickCtx, pickCancel := context.WithTimeout(ctx, 3*time.Second)
+	// 10s instead of the 3s used elsewhere because this context
+	// bounds three sequential waits, not one.
+	pickCtx, pickCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer pickCancel()
 	reqEv, ok := drainUntil(pickCtx, evcA, func(e pubsub.Event[proto.PermissionRequest]) bool {
 		return e.Payload.ToolCallID == toolCallID
