@@ -2711,6 +2711,32 @@ type parsedErrorJSON struct {
 	RetryAfter time.Duration `json:"retryAfter"`
 }
 
+// epochThreshold distinguishes a relative duration in seconds from a Unix
+// epoch timestamp. Providers return both shapes in Retry-After and
+// x-ratelimit-reset-* headers with no way to tell them apart other than
+// magnitude. 1e9 seconds is ~31 years as a relative delay -- never a real
+// backoff -- and 1e9 as an epoch is 2001-09-09, safely in the past, so
+// anything above it is a timestamp.
+const epochThreshold = 1e9
+
+// timeNow is overridable so tests can fix the wall clock for the epoch
+// and HTTP-date duration maths in secondsOrEpoch and parseFlexDuration.
+var timeNow = time.Now
+
+// secondsOrEpoch interprets a positive number of seconds as either a relative
+// delay or a Unix epoch timestamp, depending on magnitude. An epoch already in
+// the past yields a zero duration, which callers would silently treat as
+// "no value"; clamp it to 0 explicitly.
+func secondsOrEpoch(sec float64) time.Duration {
+	if sec > epochThreshold {
+		if t := time.Unix(int64(sec), 0); t.After(timeNow()) {
+			return t.Sub(timeNow())
+		}
+		return 0
+	}
+	return time.Duration(sec * float64(time.Second))
+}
+
 func parseFlexDuration(v any) time.Duration {
 	if v == nil {
 		return 0
@@ -2718,15 +2744,15 @@ func parseFlexDuration(v any) time.Duration {
 	switch val := v.(type) {
 	case float64:
 		if val > 0 {
-			return time.Duration(val * float64(time.Second))
+			return secondsOrEpoch(val)
 		}
 	case int64:
 		if val > 0 {
-			return time.Duration(val) * time.Second
+			return secondsOrEpoch(float64(val))
 		}
 	case int:
 		if val > 0 {
-			return time.Duration(val) * time.Second
+			return secondsOrEpoch(float64(val))
 		}
 	case string:
 		val = strings.TrimSpace(val)
@@ -2734,10 +2760,20 @@ func parseFlexDuration(v any) time.Duration {
 			return 0
 		}
 		if sec, err := strconv.ParseFloat(val, 64); err == nil && sec > 0 {
-			return time.Duration(sec * float64(time.Second))
+			return secondsOrEpoch(sec)
 		}
 		if d, err := time.ParseDuration(val); err == nil && d > 0 {
 			return d
+		}
+		// Retry-After may also be an HTTP-date (RFC 9110) rather than
+		// delta-seconds. Try it last: a date can never be parsed as a
+		// number, so the numeric forms above take precedence with no
+		// ambiguity.
+		if t, err := http.ParseTime(val); err == nil {
+			if d := t.Sub(timeNow()); d > 0 {
+				return d
+			}
+			return 0
 		}
 	}
 	return 0
@@ -2774,51 +2810,75 @@ func parseJSONErrorString(input string) *parsedErrorJSON {
 		return nil
 	}
 	jsonSub := input[start : end+1]
+
+	// The "error" field is kept as raw JSON because providers disagree on
+	// its shape: OpenAI-style gateways nest an object, while OAuth 2.0
+	// (RFC 6749 §5.2) and several proxy endpoints emit a plain string code
+	// (e.g. "rate_limit_exceeded"). Declaring it as a typed object would
+	// make json.Unmarshal fail on the string form and discard every sibling
+	// field, even ones that parsed fine.
 	var payload struct {
+		Type            string          `json:"type"`
+		Message         string          `json:"message"`
+		RetryAfter      any             `json:"retryAfter"`
+		RetryAfterSnake any             `json:"retry_after"`
+		RetryAfterSecs  any             `json:"retry_after_seconds"`
+		ResetsIn        any             `json:"resets_in"`
+		ResetIn         any             `json:"reset_in"`
+		Error           json.RawMessage `json:"error"`
+		Detail          string          `json:"detail"`
+	}
+	if json.Unmarshal([]byte(jsonSub), &payload) != nil {
+		return nil
+	}
+
+	// Decode the error field flexibly: first as the OpenAI-shaped object,
+	// then — failing that — as the OAuth-style string code.
+	type errorObj struct {
 		Type            string `json:"type"`
 		Message         string `json:"message"`
+		Code            any    `json:"code"`
+		Status          string `json:"status"`
+		Detail          string `json:"detail"`
 		RetryAfter      any    `json:"retryAfter"`
 		RetryAfterSnake any    `json:"retry_after"`
 		RetryAfterSecs  any    `json:"retry_after_seconds"`
 		ResetsIn        any    `json:"resets_in"`
 		ResetIn         any    `json:"reset_in"`
-		Error           struct {
-			Type            string `json:"type"`
-			Message         string `json:"message"`
-			Code            any    `json:"code"`
-			Status          string `json:"status"`
-			Detail          string `json:"detail"`
-			RetryAfter      any    `json:"retryAfter"`
-			RetryAfterSnake any    `json:"retry_after"`
-			RetryAfterSecs  any    `json:"retry_after_seconds"`
-			ResetsIn        any    `json:"resets_in"`
-			ResetIn         any    `json:"reset_in"`
-		} `json:"error"`
-		Detail string `json:"detail"`
 	}
-	if json.Unmarshal([]byte(jsonSub), &payload) != nil {
-		return nil
+	var errObj errorObj
+	errCode := ""
+	if len(payload.Error) > 0 {
+		if json.Unmarshal(payload.Error, &errObj) != nil {
+			if err := json.Unmarshal(payload.Error, &errCode); err != nil {
+				// Neither shape: keep the sibling fields that did parse.
+				errCode = ""
+			}
+		}
 	}
+
 	res := &parsedErrorJSON{}
 	if payload.Type != "" {
 		res.Type = payload.Type
-	} else if payload.Error.Type != "" {
-		res.Type = payload.Error.Type
+	} else if errObj.Type != "" {
+		res.Type = errObj.Type
+	} else if errCode != "" {
+		res.Type = errCode
 	}
 
 	if payload.Message != "" {
 		res.Message = payload.Message
-	} else if payload.Error.Message != "" {
-		res.Message = payload.Error.Message
+	} else if errObj.Message != "" {
+		res.Message = errObj.Message
 	} else if payload.Detail != "" {
 		res.Message = payload.Detail
-	} else if payload.Error.Detail != "" {
-		res.Message = payload.Error.Detail
+	} else if errObj.Detail != "" {
+		res.Message = errObj.Detail
 	}
 
 	for _, rawVal := range []any{
 		payload.RetryAfter, payload.RetryAfterSnake, payload.RetryAfterSecs, payload.ResetsIn, payload.ResetIn,
-		payload.Error.RetryAfter, payload.Error.RetryAfterSnake, payload.Error.RetryAfterSecs, payload.Error.ResetsIn, payload.Error.ResetIn,
+		errObj.RetryAfter, errObj.RetryAfterSnake, errObj.RetryAfterSecs, errObj.ResetsIn, errObj.ResetIn,
 	} {
 		if dur := parseFlexDuration(rawVal); dur > 0 {
 			res.RetryAfter = dur
