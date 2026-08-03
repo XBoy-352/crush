@@ -622,9 +622,15 @@ func TestClientWorkspace_RecoversFromWorkspaceGone(t *testing.T) {
 	}, 3*time.Second, 5*time.Millisecond,
 		"the recovered workspace must be told which session the client is on")
 
-	states := rec.states()
-	require.Contains(t, states, ConnectionDegraded)
-	require.Contains(t, states, ConnectionRecovered,
+	require.Eventually(t, func() bool {
+		states := rec.states()
+		var degraded, recovered bool
+		for _, s := range states {
+			degraded = degraded || s == ConnectionDegraded
+			recovered = recovered || s == ConnectionRecovered
+		}
+		return degraded && recovered
+	}, 3*time.Second, 5*time.Millisecond,
 		"the UI must be told to resync after the workspace was re-created")
 
 	ws.Shutdown()
