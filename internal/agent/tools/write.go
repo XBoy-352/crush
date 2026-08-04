@@ -72,7 +72,8 @@ func NewWriteTool(
 				}
 
 				modTime := fileInfo.ModTime().Truncate(time.Second)
-				lastRead := filetracker.LastReadTime(ctx, sessionID, filePath)
+				rootSessionID := GetRootSessionFromContext(ctx)
+				lastRead := filetracker.LastReadTime(ctx, rootSessionID, filePath)
 				if modTime.After(lastRead) {
 					return fantasy.NewTextErrorResponse(fmt.Sprintf("File %s has been modified since it was last read.\nLast modification: %s\nLast read: %s\n\nPlease read the file again before modifying it.",
 						filePath, modTime.Format(time.RFC3339), lastRead.Format(time.RFC3339))), nil
@@ -145,13 +146,14 @@ func NewWriteTool(
 				// Keep the created baseline so the divergence check below
 				// compares against real content, not a zero-value struct
 				// (which would write a duplicate intermediate version).
+				rootSessionID := GetRootSessionFromContext(ctx)
 				if fileInfo == nil {
 					// The file did not exist on disk: the agent is creating it,
 					// so mark the baseline is_new — a revert deletes it rather
 					// than restoring empty content.
-					file, err = files.CreateNew(ctx, sessionID, filePath, oldContent, GetMessageFromContext(ctx))
+					file, err = files.CreateNew(ctx, rootSessionID, filePath, oldContent, GetMessageFromContext(ctx))
 				} else {
-					file, err = files.Create(ctx, sessionID, filePath, oldContent, GetMessageFromContext(ctx))
+					file, err = files.Create(ctx, rootSessionID, filePath, oldContent, GetMessageFromContext(ctx))
 				}
 				if err != nil {
 					// Log error but don't fail the operation
@@ -159,19 +161,21 @@ func NewWriteTool(
 				}
 			}
 			if file.Content != oldContent {
+				rootSessionID := GetRootSessionFromContext(ctx)
 				// User manually changed the content; store an intermediate version
-				_, err = files.CreateVersion(ctx, sessionID, filePath, oldContent, GetMessageFromContext(ctx))
+				_, err = files.CreateVersion(ctx, rootSessionID, filePath, oldContent, GetMessageFromContext(ctx))
 				if err != nil {
 					slog.Error("Error creating file history version", "error", err)
 				}
 			}
 			// Store the new version
-			_, err = files.CreateVersion(ctx, sessionID, filePath, params.Content, GetMessageFromContext(ctx))
+			rootSessionID := GetRootSessionFromContext(ctx)
+			_, err = files.CreateVersion(ctx, rootSessionID, filePath, params.Content, GetMessageFromContext(ctx))
 			if err != nil {
 				slog.Error("Error creating file history version", "error", err)
 			}
 
-			filetracker.RecordRead(ctx, sessionID, filePath)
+			filetracker.RecordRead(ctx, rootSessionID, filePath)
 
 			notifyLSPs(ctx, lspManager, params.FilePath)
 

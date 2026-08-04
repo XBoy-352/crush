@@ -165,22 +165,23 @@ func createNewFile(edit editContext, filePath, content string, call fantasy.Tool
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to write file: %w", err)
 	}
 
+	rootSessionID := GetRootSessionFromContext(edit.ctx)
 	// File can't be in the history so we create a new file history. Mark it
 	// is_new (CreateNew) so a revert deletes the agent-created file.
-	_, err = edit.files.CreateNew(edit.ctx, sessionID, filePath, "", GetMessageFromContext(edit.ctx))
+	_, err = edit.files.CreateNew(edit.ctx, rootSessionID, filePath, "", GetMessageFromContext(edit.ctx))
 	if err != nil {
 		// Log error but don't fail the operation
 		return fantasy.ToolResponse{}, fmt.Errorf("error creating file history: %w", err)
 	}
 
 	// Add the new content to the file history
-	_, err = edit.files.CreateVersion(edit.ctx, sessionID, filePath, content, GetMessageFromContext(edit.ctx))
+	_, err = edit.files.CreateVersion(edit.ctx, rootSessionID, filePath, content, GetMessageFromContext(edit.ctx))
 	if err != nil {
 		// Log error but don't fail the operation
 		slog.Error("Error creating file history version", "error", err)
 	}
 
-	edit.filetracker.RecordRead(edit.ctx, sessionID, filePath)
+	edit.filetracker.RecordRead(edit.ctx, rootSessionID, filePath)
 
 	return fantasy.WithResponseMetadata(
 		fantasy.NewTextResponse("File created: "+filePath),
@@ -249,25 +250,26 @@ func commitFileChange(edit editContext, sessionID, filePath, oldContent, newCont
 		return fmt.Errorf("failed to write file: %w", err)
 	}
 
+	rootSessionID := GetRootSessionFromContext(edit.ctx)
 	msgID := GetMessageFromContext(edit.ctx)
-	file, err := edit.files.GetByPathAndSession(edit.ctx, filePath, sessionID)
+	file, err := edit.files.GetByPathAndSession(edit.ctx, filePath, rootSessionID)
 	if err != nil {
-		_, err = edit.files.Create(edit.ctx, sessionID, filePath, oldContent, msgID)
+		_, err = edit.files.Create(edit.ctx, rootSessionID, filePath, oldContent, msgID)
 		if err != nil {
 			return fmt.Errorf("error creating file history: %w", err)
 		}
 	}
 	if file.Content != oldContent {
 		// User manually changed the content; store an intermediate version.
-		if _, err := edit.files.CreateVersion(edit.ctx, sessionID, filePath, oldContent, msgID); err != nil {
+		if _, err := edit.files.CreateVersion(edit.ctx, rootSessionID, filePath, oldContent, msgID); err != nil {
 			slog.Error("Error creating file history version", "error", err)
 		}
 	}
-	if _, err := edit.files.CreateVersion(edit.ctx, sessionID, filePath, newContent, msgID); err != nil {
+	if _, err := edit.files.CreateVersion(edit.ctx, rootSessionID, filePath, newContent, msgID); err != nil {
 		slog.Error("Error creating file history version", "error", err)
 	}
 
-	edit.filetracker.RecordRead(edit.ctx, sessionID, filePath)
+	edit.filetracker.RecordRead(edit.ctx, rootSessionID, filePath)
 	return nil
 }
 
@@ -289,7 +291,8 @@ func loadExistingFile(edit editContext, filePath, sessionError string) (sessionI
 		return "", "", false, fantasy.ToolResponse{}, fmt.Errorf("%s", sessionError)
 	}
 
-	lastRead := edit.filetracker.LastReadTime(edit.ctx, sessionID, filePath)
+	rootSessionID := GetRootSessionFromContext(edit.ctx)
+	lastRead := edit.filetracker.LastReadTime(edit.ctx, rootSessionID, filePath)
 	if lastRead.IsZero() {
 		return "", "", false, fantasy.NewTextErrorResponse("you must read the file before editing it. Use the View tool first"), nil
 	}
