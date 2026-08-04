@@ -3,13 +3,10 @@ package chat
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
-	"strconv"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"charm.land/lipgloss/v2/tree"
 
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/message"
@@ -120,9 +117,6 @@ func (w *WorkflowToolMessageItem) Description() string {
 	return params.Description
 }
 
-// agentLabelIndexRe extracts the agent index from a synthetic tool call ID.
-var agentLabelIndexRe = regexp.MustCompile(`-a(\d+)$`)
-
 // truncateString truncates s to at most max runes, appending "…" if truncated.
 func truncateString(s string, max int) string {
 	if max < 1 {
@@ -179,23 +173,8 @@ func (r *WorkflowToolRenderContext) RenderTool(sty *styles.Styles, width int, op
 		),
 	)
 
-	childTools := tree.Root(header)
-
-	for _, nestedTool := range r.workflow.nestedTools {
-		childView := nestedTool.Render(remainingWidth)
-		// Prefix with agent label when available.
-		if m := agentLabelIndexRe.FindStringSubmatch(nestedTool.ToolCall().ID); len(m) >= 2 {
-			if idx, err := strconv.Atoi(m[1]); err == nil {
-				if label, ok := r.workflow.labels[idx]; ok {
-					childView = fmt.Sprintf("%s %s", label, childView)
-				}
-			}
-		}
-		childTools.Child(childView)
-	}
-
 	var parts []string
-	parts = append(parts, childTools.Enumerator(roundedEnumerator(2, taskTagWidth-5)).String())
+	parts = append(parts, header)
 
 	if !opts.HasResult() && !opts.IsCanceled() {
 		if r.workflow.total > 0 {

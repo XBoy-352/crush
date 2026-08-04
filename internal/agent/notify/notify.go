@@ -39,6 +39,9 @@ const (
 // TypeWorkflowProgress indicates the workflow engine has new live progress.
 const TypeWorkflowProgress Type = "workflow_progress"
 
+// TypeSideQuestionProgress indicates new streamed content for an ephemeral side question.
+const TypeSideQuestionProgress Type = "side_question_progress"
+
 // WorkflowProgress carries live progress for a running workflow tool.
 type WorkflowProgress struct {
 	ToolCallID string

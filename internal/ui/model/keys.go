@@ -182,7 +182,7 @@ func DefaultKeyMap() KeyMap {
 	)
 	km.Chat.Background = key.NewBinding(
 		key.WithKeys("ctrl+b"),
-		key.WithHelp("ctrl+b", "background tools"),
+		key.WithHelp("ctrl+b", "background/workflow"),
 	)
 	km.Chat.Tab = key.NewBinding(
 		key.WithKeys("tab"),

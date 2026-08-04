@@ -218,19 +218,20 @@ func processMultiEditWithCreation(edit editContext, params MultiEditParams, call
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to write file: %w", err)
 	}
 
+	rootSessionID := GetRootSessionFromContext(edit.ctx)
 	// Update file history. The file is being created, so mark it is_new
 	// (CreateNew) so a revert deletes it rather than restoring empty content.
-	_, err = edit.files.CreateNew(edit.ctx, sessionID, params.FilePath, "", GetMessageFromContext(edit.ctx))
+	_, err = edit.files.CreateNew(edit.ctx, rootSessionID, params.FilePath, "", GetMessageFromContext(edit.ctx))
 	if err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("error creating file history: %w", err)
 	}
 
-	_, err = edit.files.CreateVersion(edit.ctx, sessionID, params.FilePath, currentContent, GetMessageFromContext(edit.ctx))
+	_, err = edit.files.CreateVersion(edit.ctx, rootSessionID, params.FilePath, currentContent, GetMessageFromContext(edit.ctx))
 	if err != nil {
 		slog.Error("Error creating file history version", "error", err)
 	}
 
-	edit.filetracker.RecordRead(edit.ctx, sessionID, params.FilePath)
+	edit.filetracker.RecordRead(edit.ctx, rootSessionID, params.FilePath)
 
 	var message string
 	if len(failedEdits) > 0 {
