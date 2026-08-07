@@ -173,9 +173,10 @@ type (
 		sessionFiles []SessionFile
 	}
 	// creditsUpdatedMsg is sent when the remaining Hyper credits have been
-	// fetched from the API.
+	// fetched from the API. credits is nil when the team has hypercredit
+	// display disabled.
 	creditsUpdatedMsg struct {
-		credits int
+		credits *int
 	}
 	// revertDoneMsg is sent after a revert operation completes. msgs is the
 	// reloaded message list, fetched off the Update loop in executeRevert so
@@ -405,6 +406,8 @@ type UI struct {
 	hoverY        int
 
 	// hyperCredits is the remaining Hyper credits, updated after each prompt.
+	// It is nil when unknown, or when the team has hypercredit display
+	// disabled, and no balance is rendered in either case.
 	hyperCredits *int
 
 	// Prompt history for up/down navigation through previous messages.
@@ -1387,7 +1390,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 	case creditsUpdatedMsg:
-		m.hyperCredits = &msg.credits
+		m.hyperCredits = msg.credits
 	case revertDoneMsg:
 		// Messages were reloaded off the Update loop in executeRevert, so no
 		// IO happens here (internal/ui/AGENTS.md: never do IO in Update).
