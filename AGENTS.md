@@ -188,6 +188,14 @@ func TestYourFunction(t *testing.T) {
 - Try to keep commits to one line, not including your attribution. Only use
   multi-line commits when additional context is truly necessary.
 
+## Pull Requests
+
+- Raise PRs ONLY against the fork (`XBoy-352/crush`), never against upstream
+  `charmbracelet/crush`. This is a personal fork of vibecoded code; upstream
+  devs should not be bothered with it.
+- Push feature branches to `origin` (the fork) and create the PR with
+  `gh pr create --repo XBoy-352/crush`.
+
 ## Working on the TUI (UI)
 
 Anytime you need to work on the TUI, read `internal/ui/AGENTS.md` before

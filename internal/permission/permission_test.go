@@ -730,3 +730,153 @@ func TestPermissionService_ResolveIdempotency(t *testing.T) {
 		}
 	})
 }
+
+func TestPermissionService_RequiresExplicitApproval(t *testing.T) {
+	t.Run("yolo mode does not auto-approve explicit-approval requests", func(t *testing.T) {
+		t.Parallel()
+		service := NewPermissionService("/tmp", true, nil) // yolo mode on
+		events := service.Subscribe(t.Context())
+
+		var (
+			wg      sync.WaitGroup
+			granted bool
+			err     error
+		)
+		wg.Go(func() {
+			granted, err = service.Request(t.Context(), CreatePermissionRequest{
+				SessionID:                "s1",
+				ToolCallID:               "call-sudo",
+				ToolName:                 "bash",
+				Action:                   "execute",
+				Path:                     "/tmp",
+				Description:              "sudo command",
+				RequiresExplicitApproval: true,
+			})
+		})
+
+		event := <-events
+		assert.Equal(t, "call-sudo", event.Payload.ToolCallID)
+		service.Grant(event.Payload)
+		wg.Wait()
+		require.NoError(t, err)
+		assert.True(t, granted)
+	})
+
+	t.Run("allowlist does not auto-approve explicit-approval requests", func(t *testing.T) {
+		t.Parallel()
+		service := NewPermissionService("/tmp", false, []string{"bash:execute"})
+		events := service.Subscribe(t.Context())
+
+		var (
+			wg      sync.WaitGroup
+			granted bool
+			err     error
+		)
+		wg.Go(func() {
+			granted, err = service.Request(t.Context(), CreatePermissionRequest{
+				SessionID:                "s1",
+				ToolCallID:               "call-curl",
+				ToolName:                 "bash",
+				Action:                   "execute",
+				Path:                     "/tmp",
+				Description:              "curl command",
+				RequiresExplicitApproval: true,
+			})
+		})
+
+		event := <-events
+		assert.Equal(t, "call-curl", event.Payload.ToolCallID)
+		service.Deny(event.Payload)
+		wg.Wait()
+		require.NoError(t, err)
+		assert.False(t, granted)
+	})
+
+	t.Run("auto-approve session does not auto-approve explicit-approval requests", func(t *testing.T) {
+		t.Parallel()
+		service := NewPermissionService("/tmp", false, nil)
+		service.AutoApproveSession("s1")
+		events := service.Subscribe(t.Context())
+
+		var (
+			wg      sync.WaitGroup
+			granted bool
+			err     error
+		)
+		wg.Go(func() {
+			granted, err = service.Request(t.Context(), CreatePermissionRequest{
+				SessionID:                "s1",
+				ToolCallID:               "call-pacman",
+				ToolName:                 "bash",
+				Action:                   "execute",
+				Path:                     "/tmp",
+				Description:              "pacman command",
+				RequiresExplicitApproval: true,
+			})
+		})
+
+		event := <-events
+		assert.Equal(t, "call-pacman", event.Payload.ToolCallID)
+		service.GrantPersistent(event.Payload)
+		wg.Wait()
+		require.NoError(t, err)
+		assert.True(t, granted)
+	})
+}
+
+func TestPermissionService_SensitiveSessionGrantPersists(t *testing.T) {
+	t.Parallel()
+	service := NewPermissionService("/tmp", false, nil)
+	events := service.Subscribe(t.Context())
+
+	// First call: yolo/allowlist can't grant; the user must approve.
+	var (
+		wg      sync.WaitGroup
+		granted bool
+		err     error
+	)
+	wg.Go(func() {
+		granted, err = service.Request(t.Context(), CreatePermissionRequest{
+			SessionID:                "s1",
+			ToolCallID:               "call-sudo-1",
+			ToolName:                 "bash",
+			Action:                   "execute",
+			Path:                     "/tmp",
+			Description:              "sudo command 1",
+			RequiresExplicitApproval: true,
+		})
+	})
+	event := <-events
+	service.GrantPersistent(event.Payload) // user clicks "Allow for session"
+	wg.Wait()
+	require.NoError(t, err)
+	assert.True(t, granted)
+
+	// Second call with identical key: session grant is remembered,
+	// no prompt is published.
+	events = service.Subscribe(t.Context())
+	var (
+		wg2      sync.WaitGroup
+		granted2 bool
+		err2     error
+	)
+	wg2.Go(func() {
+		granted2, err2 = service.Request(t.Context(), CreatePermissionRequest{
+			SessionID:                "s1",
+			ToolCallID:               "call-sudo-2",
+			ToolName:                 "bash",
+			Action:                   "execute",
+			Path:                     "/tmp",
+			Description:              "sudo command 2",
+			RequiresExplicitApproval: true,
+		})
+	})
+	select {
+	case <-events:
+		t.Fatal("persistent session grant should not re-prompt for sensitive commands")
+	case <-time.After(100 * time.Millisecond):
+	}
+	wg2.Wait()
+	require.NoError(t, err2)
+	assert.True(t, granted2)
+}
