@@ -77,3 +77,9 @@ WHERE id IN (
           WHERE cp.id = sqlc.arg(checkpoint_id) AND cp.session_id = sqlc.arg(session_id)
       )
 );
+-- name: GetLastAssistantMessageBySession :one
+SELECT *
+FROM messages
+WHERE session_id = ? AND role = 'assistant' AND is_summary_message = 0
+ORDER BY created_at DESC
+LIMIT 1;
