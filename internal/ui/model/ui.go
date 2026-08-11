@@ -2749,6 +2749,12 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 			}
 			return tea.Batch(cmds...)
 		}
+		if m.workflowPopup != nil && !m.workflowPopup.IsFinished() {
+			if cmd := m.openWorkflowPopupDialog(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			return tea.Batch(cmds...)
+		}
 	}
 
 	switch m.state {
@@ -5097,6 +5103,8 @@ func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
 		return m.handleReAuthenticate(n.ProviderID)
 	case notify.TypeWorkflowProgress:
 		return m.handleWorkflowProgress(n.WorkflowProgress)
+	case notify.TypeSideQuestionProgress:
+		return m.handleSideQuestionProgress(n.Message)
 	case notify.TypeAWSSSOAuth:
 		return m.handleAWSSSOAuth(n.AWSSOCommand, n.AWSSOURL)
 	case notify.TypeAWSSSOAuthResult:
@@ -5144,21 +5152,20 @@ func (m *UI) handleWorkflowProgress(wp *notify.WorkflowProgress) tea.Cmd {
 
 	m.workflowPopup.HandleProgress(wp)
 
-	// Auto-open popup on agent start or progress if not already open or dismissed by user
-	if !m.workflowPopup.IsFinished() && !m.workflowPopup.IsDismissed() {
-		if !m.dialog.ContainsDialog(m.workflowPopup.ID()) {
-			m.dialog.OpenDialog(m.workflowPopup)
-		}
-	}
-
-	// Auto-close when workflow completes
 	if wp.Total > 0 && wp.Completed == wp.Total && wp.Running == 0 {
 		m.workflowPopup.SetFinished(true)
-		if m.dialog.ContainsDialog(m.workflowPopup.ID()) {
-			m.dialog.CloseDialog(m.workflowPopup.ID())
-		}
 	}
 
+	return nil
+}
+
+// handleSideQuestionProgress forwards live streaming content to the btw dialog.
+func (m *UI) handleSideQuestionProgress(text string) tea.Cmd {
+	if dia := m.dialog.Dialog(dialog.BtwID); dia != nil {
+		if btw, ok := dia.(*dialog.Btw); ok {
+			btw.HandleProgress(text)
+		}
+	}
 	return nil
 }
 

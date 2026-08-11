@@ -148,7 +148,7 @@ func (d *Btw) StopLoading() {
 func (d *Btw) HandleMsg(msg tea.Msg) Action {
 	switch msg := msg.(type) {
 	case SideQuestionResultMsg:
-		if d.state != btwStateLoading {
+		if d.state != btwStateLoading && d.state != btwStateAnswer {
 			return nil
 		}
 		if msg.Err != nil {
@@ -254,6 +254,18 @@ func (d *Btw) submit() Action {
 			}
 		},
 	)}
+}
+
+// HandleProgress receives live streaming content for the side question.
+func (d *Btw) HandleProgress(text string) {
+	if d.state == btwStateInput {
+		return
+	}
+	if d.state == btwStateLoading {
+		d.state = btwStateAnswer
+	}
+	d.answer += text
+	d.viewportDirty = true
 }
 
 // Draw implements Dialog.

@@ -1993,10 +1993,18 @@ func (a *sessionAgent) SideQuestion(ctx context.Context, sessionID, question str
 			fantasy.WithMaxOutputTokens(2048),
 			fantasy.WithUserAgent(userAgent),
 		)
-		res, err := sideAgent.Generate(ctx, fantasy.AgentCall{
+		res, err := sideAgent.Stream(ctx, fantasy.AgentStreamCall{
 			Prompt:   question,
 			Messages: aiMsgs,
 			Headers:  sessionHeaders(sessionID),
+			OnTextDelta: func(id string, text string) error {
+				a.notify.Publish(pubsub.CreatedEvent, notify.Notification{
+					SessionID: sessionID,
+					Type:      notify.TypeSideQuestionProgress,
+					Message:   text,
+				})
+				return nil
+			},
 		})
 		if err != nil {
 			lastErr = err
