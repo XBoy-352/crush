@@ -732,6 +732,8 @@ func TestPermissionService_ResolveIdempotency(t *testing.T) {
 }
 
 func TestPermissionService_RequiresExplicitApproval(t *testing.T) {
+	t.Parallel()
+
 	t.Run("yolo mode does not auto-approve explicit-approval requests", func(t *testing.T) {
 		t.Parallel()
 		service := NewPermissionService("/tmp", true, nil) // yolo mode on
