@@ -440,3 +440,39 @@ func TestCacheStore_ReplacesFileInsteadOfRewritingIt(t *testing.T) {
 	require.Len(t, entries, 1, "only the cache file should remain")
 	require.Equal(t, "providers.json", entries[0].Name())
 }
+
+func TestFixGrok46Context_OverwritesStaleCatalog(t *testing.T) {
+	t.Parallel()
+
+	providers := []catwalk.Provider{
+		{ID: "openrouter", Models: []catwalk.Model{{ID: "grok-4.6", ContextWindow: 200000}}},
+		{ID: "xai", Models: []catwalk.Model{
+			{ID: "grok-4.5", ContextWindow: 500000},
+			{ID: "grok-4.6", Name: "stale", ContextWindow: 200000, DefaultMaxTokens: 20000},
+		}},
+	}
+	fixGrok46Context(providers)
+
+	require.Equal(t, int64(200000), providers[0].Models[0].ContextWindow)
+	got := providers[1].Models[1]
+	require.Equal(t, "stale", got.Name)
+	require.Equal(t, int64(500000), got.ContextWindow)
+	require.Equal(t, int64(50000), got.DefaultMaxTokens)
+	require.Equal(t, int64(500000), providers[1].Models[0].ContextWindow)
+}
+
+func TestFixGrok46Context_InsertsWhenMissing(t *testing.T) {
+	t.Parallel()
+
+	providers := []catwalk.Provider{{ID: "xai", Models: []catwalk.Model{{ID: "grok-4.5"}}}}
+	fixGrok46Context(providers)
+	require.Equal(t, grok46, providers[0].Models[1])
+}
+
+func TestFixGrok46Context_NoXAI(t *testing.T) {
+	t.Parallel()
+
+	providers := []catwalk.Provider{{ID: "openrouter"}}
+	fixGrok46Context(providers)
+	require.Empty(t, providers[0].Models)
+}

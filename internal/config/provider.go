@@ -239,9 +239,42 @@ func Providers(cfg *Config, opts ...HyperTokenRefresher) ([]catwalk.Provider, er
 		} else {
 			providerList = slices.Collect(providers.Seq())
 		}
+		fixGrok46Context(providerList)
 		providerErr = errors.Join(catwalkErr, hyperErr)
 	})
 	return providerList, providerErr
+}
+
+var grok46 = catwalk.Model{
+	ID:                     "grok-4.6",
+	Name:                   "Grok 4.6",
+	ContextWindow:          500000,
+	DefaultMaxTokens:       50000,
+	CostPer1MIn:            2.0,
+	CostPer1MOut:           6.0,
+	CostPer1MInCached:      0.5,
+	CostPer1MOutCached:     1.2,
+	CanReason:              true,
+	ReasoningLevels:        []string{"low", "medium", "high", "xhigh"},
+	DefaultReasoningEffort: "high",
+	SupportsImages:         true,
+}
+
+func fixGrok46Context(providers []catwalk.Provider) {
+	for i := range providers {
+		if providers[i].ID != "xai" {
+			continue
+		}
+		for j := range providers[i].Models {
+			if providers[i].Models[j].ID == grok46.ID {
+				providers[i].Models[j].ContextWindow = grok46.ContextWindow
+				providers[i].Models[j].DefaultMaxTokens = grok46.DefaultMaxTokens
+				return
+			}
+		}
+		providers[i].Models = append(providers[i].Models, grok46)
+		return
+	}
 }
 
 // UpdateProviderInList replaces a provider in the memoized provider list
