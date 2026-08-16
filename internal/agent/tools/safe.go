@@ -46,8 +46,13 @@ type safeCommand struct {
 // subcommand run a program or write a file: external diff drivers,
 // pager handoff, and explicit output redirection. They are rejected
 // everywhere they are accepted as flags.
+//
+// --textconv sits here for the same reason as --ext-diff: both run a
+// program named by the repository's own config, so a repository the user
+// cloned but does not control chooses what executes.
 var gitCodeExecFlags = []string{
 	"--ext-diff",
+	"--textconv",
 	"--open-files-in-pager",
 	"-O",
 	"--output",
@@ -91,7 +96,22 @@ var safeCommands = []safeCommand{
 	{argv: []string{"echo"}, allowOperands: true},
 	{argv: []string{"free"}, allowOperands: true},
 	{argv: []string{"groups"}, allowOperands: true},
-	{argv: []string{"hostname"}, allowOperands: false},
+	// hostname's flags are enumerated rather than denied, because the ones
+	// that write take their value attached to the flag: `hostname -F/etc/x`
+	// sets the hostname from a file in a single token, so there is no
+	// operand for allowOperands to reject. An allow list fails closed on
+	// the whole shape, including clustered forms.
+	{
+		argv:          []string{"hostname"},
+		restrictFlags: true,
+		allowFlags: []string{
+			"-a", "--alias", "-A", "--all-fqdns", "-d", "--domain",
+			"-f", "--fqdn", "--long", "-i", "--ip-address",
+			"-I", "--all-ip-addresses", "-s", "--short",
+			"-y", "--yp", "--nis",
+		},
+		allowOperands: false,
+	},
 	{argv: []string{"id"}, allowOperands: true},
 	{argv: []string{"ls"}, allowOperands: true},
 	{argv: []string{"printenv"}, allowOperands: true},
@@ -167,7 +187,17 @@ var safeCommands = []safeCommand{
 	},
 	// Read-only remote subcommands, spelled out so the mutating siblings
 	// (add, remove, rename, set-url, prune) stay off the list.
-	{argv: []string{"git", "remote", "show"}, allowOperands: true},
+	//
+	// `git remote show` queries the remote over the network unless -n is
+	// given, so -n is required here — otherwise this entry would admit
+	// exactly the network access that keeps `git ls-remote` off the list.
+	{
+		argv:          []string{"git", "remote", "show"},
+		restrictFlags: true,
+		allowFlags:    []string{"-n"},
+		requireFlag:   true,
+		allowOperands: true,
+	},
 	{argv: []string{"git", "remote", "get-url"}, allowOperands: true},
 	// `git config --get <key>` reads one key; the bare `--get` prefix used
 	// to also admit --get-urlmatch and friends, so the flag is matched
@@ -200,13 +230,16 @@ type commandWrapper struct {
 	// skipOperands is how many non-flag operands belong to the wrapper
 	// itself before the inner command begins (`timeout 5 ls` → 1).
 	skipOperands int
-	// allowAssigns permits NAME=VALUE tokens before the inner command,
-	// which only `env` accepts.
-	allowAssigns bool
 }
 
 var commandWrappers = []commandWrapper{
-	{name: "env", allowAssigns: true, valueFlags: []string{"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}},
+	// `env` takes NAME=VALUE assignments before its command, and they are
+	// deliberately not skipped here: an assignment is the same environment
+	// steering that safeStmt rejects for the `FOO=bar cmd` prefix form, so
+	// it has to fail the same way. The assignment is left in place as the
+	// inner argv's first token, which matches no entry, so the command
+	// falls through to the prompt.
+	{name: "env", valueFlags: []string{"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}},
 	{name: "nohup"},
 	{name: "nice", valueFlags: []string{"-n", "--adjustment"}},
 	{name: "timeout", skipOperands: 1, valueFlags: []string{"-s", "--signal", "-k", "--kill-after"}},
@@ -350,8 +383,6 @@ func peelWrapper(argv []string) ([]string, bool) {
 				}
 				rest = rest[1:]
 			}
-		case w.allowAssigns && isAssignment(tok):
-			rest = rest[1:]
 		case operandsSkipped < w.skipOperands:
 			operandsSkipped++
 			rest = rest[1:]
@@ -379,12 +410,13 @@ func (sc safeCommand) matches(argv []string) bool {
 			continue
 		}
 		if !operandsOnly && isFlag(arg) {
-			name := flagName(arg)
 			if sc.restrictFlags {
-				if !slices.Contains(sc.allowFlags, name) {
+				// Matched exactly: an unrecognized spelling, including a
+				// cluster of otherwise-allowed short flags, fails closed.
+				if !slices.Contains(sc.allowFlags, flagName(arg)) {
 					return false
 				}
-			} else if slices.Contains(sc.denyFlags, name) {
+			} else if flagDenied(arg, sc.denyFlags) {
 				return false
 			}
 			sawFlag = true
@@ -404,31 +436,33 @@ func isFlag(tok string) bool {
 	return len(tok) > 1 && strings.HasPrefix(tok, "-") && tok != "--"
 }
 
+// flagDenied reports whether tok is a denied flag, or carries one.
+//
+// A long flag matches by name, so `--output=x` is caught by an entry of
+// "--output". A short flag needs more than that: getopt accepts its value
+// attached (`date -s2020-01-01`) and accepts clusters (`date -us`), so
+// neither spelling is equal to "-s". Every character of a single-dash
+// token is therefore checked against the deny set.
+func flagDenied(tok string, deny []string) bool {
+	if slices.Contains(deny, flagName(tok)) {
+		return true
+	}
+	if strings.HasPrefix(tok, "--") {
+		return false
+	}
+	for _, r := range tok[1:] {
+		if slices.Contains(deny, "-"+string(r)) {
+			return true
+		}
+	}
+	return false
+}
+
 // flagName strips any =value suffix so `--format=%H` is matched by an
 // entry of "--format".
 func flagName(tok string) string {
 	name, _, _ := strings.Cut(tok, "=")
 	return name
-}
-
-// isAssignment reports whether a token is a NAME=VALUE environment
-// assignment of the form `env` accepts before its command.
-func isAssignment(tok string) bool {
-	name, _, ok := strings.Cut(tok, "=")
-	if !ok || name == "" {
-		return false
-	}
-	for i, r := range name {
-		isAlpha := r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
-		isDigit := r >= '0' && r <= '9'
-		// A name is letters, digits and underscores, and cannot lead
-		// with a digit.
-		valid := isAlpha || (isDigit && i > 0)
-		if !valid {
-			return false
-		}
-	}
-	return true
 }
 
 // literalArgs converts parsed words to plain strings, reporting false if
