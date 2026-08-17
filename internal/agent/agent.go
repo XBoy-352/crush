@@ -3046,20 +3046,23 @@ func formatProviderErrorForAssistant(err *fantasy.ProviderError) (string, string
 		return "Provider Error", "An unknown error occurred."
 	}
 	formatted := formatProviderError(err)
-	parts := strings.Split(formatted, " - ")
+	parts := strings.SplitN(formatted, " - ", 3)
 	if len(parts) >= 2 {
 		if strings.HasPrefix(parts[0], "HTTP ") {
 			title := parts[1]
 			var body string
 			if len(parts) >= 3 {
-				body = strings.Join(parts[2:], " - ")
+				body = parts[2]
 			} else {
 				body = parts[0]
 			}
 			return title, body
 		}
 		title := parts[0]
-		body := strings.Join(parts[1:], " - ")
+		body := parts[1]
+		if len(parts) >= 3 {
+			body += " - " + parts[2]
+		}
 		return title, body
 	}
 	return cmp.Or(stringext.Capitalize(err.Title), "Provider Error"), formatted
