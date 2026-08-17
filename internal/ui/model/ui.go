@@ -2469,7 +2469,9 @@ func (m *UI) restoreModelFromSession(msgs []message.Message) tea.Cmd {
 		Provider: lastAssistant.Provider,
 		Model:    lastAssistant.Model,
 	}
-	if err := m.com.Workspace.UpdatePreferredModel(config.ScopeGlobal, config.SelectedModelTypeLarge, selectedModel); err != nil {
+	// Apply in-memory only: restoring a resumed session's model must not
+	// rewrite the user's global default.
+	if err := m.com.Workspace.OverridePreferredModel(config.SelectedModelTypeLarge, selectedModel); err != nil {
 		slog.Error("Failed to restore model from session", "error", err)
 		return nil
 	}
@@ -2478,7 +2480,7 @@ func (m *UI) restoreModelFromSession(msgs []message.Message) tea.Cmd {
 
 	if _, ok := cfg.Models[config.SelectedModelTypeSmall]; !ok {
 		smallModel := m.com.Workspace.GetDefaultSmallModel(lastAssistant.Provider)
-		if err := m.com.Workspace.UpdatePreferredModel(config.ScopeGlobal, config.SelectedModelTypeSmall, smallModel); err != nil {
+		if err := m.com.Workspace.OverridePreferredModel(config.SelectedModelTypeSmall, smallModel); err != nil {
 			slog.Error("Failed to set small model during session restore", "error", err)
 		}
 	}

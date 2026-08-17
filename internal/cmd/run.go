@@ -505,7 +505,7 @@ func overrideModels(
 		}
 		largeProviderID = found.provider
 		slog.Info("Overriding large model", "provider", found.provider, "model", found.modelID)
-		if err := c.UpdatePreferredModel(ctx, ws.ID, config.ScopeWorkspace, config.SelectedModelTypeLarge, config.SelectedModel{
+		if err := c.OverridePreferredModel(ctx, ws.ID, config.SelectedModelTypeLarge, config.SelectedModel{
 			Provider: found.provider,
 			Model:    found.modelID,
 		}); err != nil {
@@ -520,7 +520,7 @@ func overrideModels(
 			return err
 		}
 		slog.Info("Overriding small model", "provider", found.provider, "model", found.modelID)
-		if err := c.UpdatePreferredModel(ctx, ws.ID, config.ScopeWorkspace, config.SelectedModelTypeSmall, config.SelectedModel{
+		if err := c.OverridePreferredModel(ctx, ws.ID, config.SelectedModelTypeSmall, config.SelectedModel{
 			Provider: found.provider,
 			Model:    found.modelID,
 		}); err != nil {
@@ -532,7 +532,7 @@ func overrideModels(
 		if err != nil {
 			slog.Warn("Failed to get default small model", "error", err)
 		} else if sm != nil {
-			if err := c.UpdatePreferredModel(ctx, ws.ID, config.ScopeWorkspace, config.SelectedModelTypeSmall, *sm); err != nil {
+			if err := c.OverridePreferredModel(ctx, ws.ID, config.SelectedModelTypeSmall, *sm); err != nil {
 				return fmt.Errorf("failed to set small model: %w", err)
 			}
 		}
@@ -580,7 +580,9 @@ func restoreModelFromSession(ctx context.Context, c *client.Client, ws *proto.Wo
 		Provider: lastAssistant.Provider,
 		Model:    lastAssistant.Model,
 	}
-	if err := c.UpdatePreferredModel(ctx, ws.ID, config.ScopeWorkspace, config.SelectedModelTypeLarge, selectedModel); err != nil {
+	// Apply in-memory only: restoring a resumed session's model must not
+	// rewrite the workspace default.
+	if err := c.OverridePreferredModel(ctx, ws.ID, config.SelectedModelTypeLarge, selectedModel); err != nil {
 		return fmt.Errorf("failed to set large model: %w", err)
 	}
 
@@ -589,7 +591,7 @@ func restoreModelFromSession(ctx context.Context, c *client.Client, ws *proto.Wo
 		if err != nil {
 			slog.Warn("Failed to get default small model", "error", err)
 		} else if sm != nil {
-			if err := c.UpdatePreferredModel(ctx, ws.ID, config.ScopeWorkspace, config.SelectedModelTypeSmall, *sm); err != nil {
+			if err := c.OverridePreferredModel(ctx, ws.ID, config.SelectedModelTypeSmall, *sm); err != nil {
 				slog.Warn("Failed to set small model during session restore", "error", err)
 			}
 		}

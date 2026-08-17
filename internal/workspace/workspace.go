@@ -230,6 +230,12 @@ type Workspace interface {
 
 	// Config mutations (proxied to server in client mode)
 	UpdatePreferredModel(scope config.Scope, modelType config.SelectedModelType, model config.SelectedModel) error
+	// OverridePreferredModel sets the preferred model in memory only,
+	// without persisting it to the config file. It is used for per-session
+	// overrides (such as restoring the model that produced a resumed
+	// session's last response) that must not rewrite the user's global
+	// default.
+	OverridePreferredModel(modelType config.SelectedModelType, model config.SelectedModel) error
 	SetCompactMode(scope config.Scope, enabled bool) error
 	SetProviderAPIKey(scope config.Scope, providerID string, apiKey any) error
 	SetConfigField(scope config.Scope, key string, value any) error

@@ -77,12 +77,29 @@ func (b *Backend) RemoveConfigField(workspaceID string, scope config.Scope, key 
 // UpdatePreferredModel updates the preferred model for the given type
 // and persists it to the config file at the given scope.
 func (b *Backend) UpdatePreferredModel(workspaceID string, scope config.Scope, modelType config.SelectedModelType, model config.SelectedModel) error {
+	return b.setPreferredModel(workspaceID, scope, modelType, model, true)
+}
+
+// OverridePreferredModel sets the preferred model for the given type in
+// memory only, without persisting it to the config file. It is used for
+// per-session overrides (such as restoring the model that produced a
+// resumed session's last response) that must not rewrite the user's
+// global default.
+func (b *Backend) OverridePreferredModel(workspaceID string, modelType config.SelectedModelType, model config.SelectedModel) error {
+	return b.setPreferredModel(workspaceID, config.ScopeGlobal, modelType, model, false)
+}
+
+func (b *Backend) setPreferredModel(workspaceID string, scope config.Scope, modelType config.SelectedModelType, model config.SelectedModel, persist bool) error {
 	ws, err := b.GetWorkspace(workspaceID)
 	if err != nil {
 		return err
 	}
-	if err := ws.Cfg.UpdatePreferredModel(scope, modelType, model); err != nil {
-		return err
+	if persist {
+		if err := ws.Cfg.UpdatePreferredModel(scope, modelType, model); err != nil {
+			return err
+		}
+	} else {
+		ws.Cfg.OverridePreferredModel(modelType, model)
 	}
 	publishConfigChanged(ws)
 	return nil
