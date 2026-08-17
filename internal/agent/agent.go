@@ -2884,6 +2884,14 @@ func parseJSONErrorString(input string) *parsedErrorJSON {
 		}
 	}
 
+	// A JSON object that parsed but yielded none of the fields we look for
+	// (e.g. an unrelated `{}` embedded in free text) carries no signal.
+	// Report it as "didn't parse" so callers fall back to the next raw
+	// candidate (ResponseBody, cause chain) instead of stopping here.
+	if res.Type == "" && res.Message == "" && res.RetryAfter == 0 {
+		return nil
+	}
+
 	return res
 }
 
