@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"charm.land/lipgloss/v2/tree"
 
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/message"
@@ -173,8 +174,19 @@ func (r *WorkflowToolRenderContext) RenderTool(sty *styles.Styles, width int, op
 		),
 	)
 
+	// Build tree with nested tool calls.
+	childTools := tree.Root(header)
+	for _, nestedTool := range r.workflow.nestedTools {
+		childView := nestedTool.Render(remainingWidth)
+		childTools.Child(childView)
+	}
+
 	var parts []string
-	parts = append(parts, header)
+	if len(r.workflow.nestedTools) > 0 {
+		parts = append(parts, childTools.Enumerator(roundedEnumerator(2, taskTagWidth-5)).String())
+	} else {
+		parts = append(parts, header)
+	}
 
 	if !opts.HasResult() && !opts.IsCanceled() {
 		if r.workflow.total > 0 {

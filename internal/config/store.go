@@ -470,6 +470,13 @@ func (s *ConfigStore) OverridePreferredModel(modelType SelectedModelType, model 
 	})
 }
 
+// ClearModelOverrides clears all in-memory preferred model overrides.
+func (s *ConfigStore) ClearModelOverrides() {
+	s.mutateInMemory(func(c *Config) {
+		s.overrides.Models = make(map[SelectedModelType]SelectedModel)
+	})
+}
+
 // pinPreferredModelLocked records a model choice made in this instance so
 // that a later config reload cannot replace it with a choice made
 // somewhere else. Several Crush instances share one global config file, so

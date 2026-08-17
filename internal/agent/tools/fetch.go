@@ -74,7 +74,7 @@ func NewFetchTool(permissions permission.Service, workingDir string, client *htt
 
 			sessionID := GetSessionFromContext(ctx)
 			if sessionID == "" {
-				return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for creating a new file")
+				return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for fetching URL")
 			}
 
 			p, err := permissions.Request(

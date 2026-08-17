@@ -681,6 +681,20 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 	// by later runs. WithoutCancel drops cancellation while keeping context
 	// values; the work is local and always completes.
 	initCtx := context.WithoutCancel(ctx)
+	if isSubAgent {
+		systemPrompt, err := prompt.Build(initCtx, large.Model.Provider(), large.Model.Model(), c.cfg)
+		if err != nil {
+			return nil, err
+		}
+		result.SetSystemPrompt(systemPrompt)
+		tools, err := c.buildTools(initCtx, agent, isSubAgent)
+		if err != nil {
+			return nil, err
+		}
+		result.SetTools(tools)
+		return result, nil
+	}
+
 	c.readyWg.Go(func() error {
 		systemPrompt, err := prompt.Build(initCtx, large.Model.Provider(), large.Model.Model(), c.cfg)
 		if err != nil {

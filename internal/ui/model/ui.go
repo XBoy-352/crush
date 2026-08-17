@@ -4478,6 +4478,7 @@ func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.
 
 	// Start the turn timer.
 	common.StartTurn()
+	m.chat.ScrollToBottom()
 
 	var cmds []tea.Cmd
 	if !m.hasSession() {
@@ -5435,6 +5436,8 @@ func (m *UI) newSession() tea.Cmd {
 	if !m.hasSession() {
 		return nil
 	}
+
+	_ = m.com.Workspace.ClearModelOverrides()
 
 	m.session = nil
 	m.sidebarOffset = 0

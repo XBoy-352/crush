@@ -58,6 +58,19 @@ func (c *Client) OverridePreferredModel(ctx context.Context, id string, modelTyp
 	return c.setPreferredModel(ctx, id, config.ScopeGlobal, modelType, model, false)
 }
 
+// ClearModelOverrides clears in-memory model overrides on the server.
+func (c *Client) ClearModelOverrides(ctx context.Context, id string) error {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/config/clear-model-overrides", id), nil, nil, nil)
+	if err != nil {
+		return fmt.Errorf("failed to clear model overrides: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to clear model overrides: status code %d", rsp.StatusCode)
+	}
+	return nil
+}
+
 func (c *Client) setPreferredModel(ctx context.Context, id string, scope config.Scope, modelType config.SelectedModelType, model config.SelectedModel, persist bool) error {
 	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/config/model", id), nil, jsonBody(struct {
 		Scope     config.Scope             `json:"scope"`

@@ -236,6 +236,7 @@ type Workspace interface {
 	// session's last response) that must not rewrite the user's global
 	// default.
 	OverridePreferredModel(modelType config.SelectedModelType, model config.SelectedModel) error
+	ClearModelOverrides() error
 	SetCompactMode(scope config.Scope, enabled bool) error
 	SetProviderAPIKey(scope config.Scope, providerID string, apiKey any) error
 	SetConfigField(scope config.Scope, key string, value any) error

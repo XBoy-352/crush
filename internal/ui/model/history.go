@@ -77,6 +77,10 @@ func (m *UI) handleHistoryDown(msg tea.Msg) tea.Cmd {
 			// without this the cursor will show up in the wrong place.
 			return m.updateTextareaWithPrevHeight(nil, prevHeight)
 		}
+		// If not navigating history, scrolling down at the end of the editor jumps chat to bottom & follows
+		if m.state == uiChat && m.hasSession() && !m.chat.Follow() {
+			return m.chat.ScrollToBottomAndSelectLast()
+		}
 	}
 
 	// First move cursor to end before navigating history.
@@ -99,6 +103,10 @@ func (m *UI) handleHistoryEscape(msg tea.Msg) tea.Cmd {
 		m.textarea.InsertString(m.promptHistory.draft)
 		m.syncBangModeFromTextarea()
 		return m.updateTextareaWithPrevHeight(nil, prevHeight)
+	}
+
+	if m.state == uiChat && m.hasSession() && !m.chat.Follow() && m.textarea.Value() == "" {
+		return m.chat.ScrollToBottomAndSelectLast()
 	}
 
 	// Let textarea handle escape normally.
