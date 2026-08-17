@@ -408,7 +408,8 @@ type UI struct {
 	// hyperCredits is the remaining Hyper credits, updated after each prompt.
 	// It is nil when unknown, or when the team has hypercredit display
 	// disabled, and no balance is rendered in either case.
-	hyperCredits *int
+	hyperCredits     *int
+	runningJobsCount int
 
 	// Prompt history for up/down navigation through previous messages.
 	promptHistory struct {
@@ -3210,6 +3211,7 @@ func (m *UI) drawHeader(scr uv.Screen, area uv.Rectangle) {
 		m.detailsOpen,
 		area.Dx(),
 		m.lspErrorCount(),
+		m.runningJobsCount,
 		m.hyperCredits,
 	)
 }

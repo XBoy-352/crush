@@ -375,6 +375,17 @@ func (m *BackgroundShellManager) ListJobs() []*BackgroundShell {
 	return jobs
 }
 
+// RunningCount returns the number of currently active (non-completed) background shells.
+func (m *BackgroundShellManager) RunningCount() int {
+	count := 0
+	for shell := range m.shells.Seq() {
+		if !shell.IsDone() {
+			count++
+		}
+	}
+	return count
+}
+
 // Cleanup removes completed jobs that have been finished for more than the retention period
 func (m *BackgroundShellManager) Cleanup() int {
 	now := time.Now().Unix()

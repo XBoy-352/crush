@@ -251,6 +251,20 @@ func (w *ClientWorkspace) ListBackgroundJobs(ctx context.Context) ([]proto.Backg
 	return w.client.ListBackgroundJobs(ctx, w.workspaceID())
 }
 
+func (w *ClientWorkspace) RunningBackgroundJobsCount(ctx context.Context) int {
+	jobs, err := w.ListBackgroundJobs(ctx)
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, j := range jobs {
+		if !j.Done {
+			count++
+		}
+	}
+	return count
+}
+
 func (w *ClientWorkspace) KillBackgroundJob(ctx context.Context, jobID string) error {
 	return w.client.KillBackgroundJob(ctx, w.workspaceID(), jobID)
 }

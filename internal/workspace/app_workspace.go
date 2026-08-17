@@ -187,6 +187,10 @@ func (w *AppWorkspace) ListBackgroundJobs(context.Context) ([]proto.BackgroundJo
 	return jobs, nil
 }
 
+func (w *AppWorkspace) RunningBackgroundJobsCount(context.Context) int {
+	return shell.GetBackgroundShellManager().RunningCount()
+}
+
 func (w *AppWorkspace) KillBackgroundJob(_ context.Context, jobID string) error {
 	return shell.GetBackgroundShellManager().Kill(jobID)
 }
