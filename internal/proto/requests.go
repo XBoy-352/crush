@@ -22,10 +22,15 @@ type ConfigRemoveRequest struct {
 }
 
 // ConfigModelRequest represents a request to update the preferred model.
+// When Persist is true the change is written to the config file at the
+// given scope; when false it is applied in-memory only (never written to
+// disk), which is how a session resume can hold its own model without
+// mutating the user's global default.
 type ConfigModelRequest struct {
 	Scope     config.Scope             `json:"scope"`
 	ModelType config.SelectedModelType `json:"model_type"`
 	Model     config.SelectedModel     `json:"model"`
+	Persist   bool                     `json:"persist"`
 }
 
 // ConfigCompactRequest represents a request to set compact mode.
