@@ -24,19 +24,14 @@ const (
 	JobRemoved JobEventType = "removed"
 )
 
-// JobEvent describes one lifecycle transition. No output, for the reasons
-// on proto.BackgroundJob.
+// JobEvent describes one lifecycle transition. It says only that a job
+// changed and whose it is: subscribers re-read whatever they render, and
+// putting the details on the wire would mean shipping them per event to
+// every client for nobody to read.
 type JobEvent struct {
-	Type        JobEventType
-	ShellID     string
-	SessionID   string
-	Command     string
-	Description string
-	WorkingDir  string
-	StartedAt   time.Time
-	CompletedAt time.Time
-	ExitCode    int
-	Interrupted bool
+	Type      JobEventType
+	ShellID   string
+	SessionID string
 }
 
 // JobCompletion is what the agent is told when a job it launched exits.
@@ -45,7 +40,6 @@ type JobCompletion struct {
 	SessionID   string
 	Command     string
 	Description string
-	WorkingDir  string
 	StartedAt   time.Time
 	CompletedAt time.Time
 	ExitCode    int
@@ -60,11 +54,6 @@ func (c JobCompletion) Duration() time.Duration {
 		return 0
 	}
 	return c.CompletedAt.Sub(c.StartedAt)
-}
-
-// Succeeded reports whether the job exited cleanly.
-func (c JobCompletion) Succeeded() bool {
-	return c.ExitCode == 0 && !c.Interrupted
 }
 
 // Status is a one-word verdict for rendering.

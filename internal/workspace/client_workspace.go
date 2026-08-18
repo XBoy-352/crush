@@ -1225,15 +1225,9 @@ func (w *ClientWorkspace) translateEvent(ev any) tea.Msg {
 		return pubsub.Event[shell.JobEvent]{
 			Type: e.Type,
 			Payload: shell.JobEvent{
-				Type:        shell.JobEventType(e.Payload.Type),
-				ShellID:     e.Payload.ShellID,
-				SessionID:   e.Payload.SessionID,
-				Command:     e.Payload.Command,
-				Description: e.Payload.Description,
-				StartedAt:   e.Payload.StartedAt,
-				CompletedAt: e.Payload.CompletedAt,
-				ExitCode:    e.Payload.ExitCode,
-				Interrupted: e.Payload.Interrupted,
+				Type:      shell.JobEventType(e.Payload.Type),
+				ShellID:   e.Payload.ShellID,
+				SessionID: e.Payload.SessionID,
 			},
 		}
 	case pubsub.Event[proto.Message]:

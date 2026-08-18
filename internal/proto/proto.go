@@ -181,18 +181,11 @@ type BackgroundJob struct {
 	Done        bool      `json:"done"`
 }
 
-// BackgroundJobEvent is the wire form of shell.JobEvent. No output, for
-// the reasons on BackgroundJob.
+// BackgroundJobEvent is the wire form of shell.JobEvent.
 type BackgroundJobEvent struct {
-	Type        string    `json:"type"`
-	ShellID     string    `json:"shell_id"`
-	SessionID   string    `json:"session_id,omitempty"`
-	Command     string    `json:"command,omitempty"`
-	Description string    `json:"description,omitempty"`
-	StartedAt   time.Time `json:"started_at,omitzero"`
-	CompletedAt time.Time `json:"completed_at,omitzero"`
-	ExitCode    int       `json:"exit_code,omitempty"`
-	Interrupted bool      `json:"interrupted,omitempty"`
+	Type      string `json:"type"`
+	ShellID   string `json:"shell_id"`
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // AgentSession represents a session with its busy status.

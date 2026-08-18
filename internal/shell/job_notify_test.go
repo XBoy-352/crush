@@ -39,7 +39,6 @@ func TestBackgroundedShellQueuesCompletion(t *testing.T) {
 	require.Equal(t, bgShell.ID, c.ShellID)
 	require.Equal(t, sessionID, c.SessionID)
 	require.Equal(t, 3, c.ExitCode)
-	require.False(t, c.Succeeded())
 	require.Equal(t, "failed", c.Status())
 	require.Contains(t, c.Output, "hello")
 	require.Equal(t, "greeting", c.Description)
@@ -78,7 +77,7 @@ func TestCompletionQueuedWhenShellExitsBeforeHandoff(t *testing.T) {
 	completions := waitForCompletions(t, sessionID, 1)
 	require.Len(t, completions, 1)
 	require.Equal(t, 0, completions[0].ExitCode)
-	require.True(t, completions[0].Succeeded())
+	require.Equal(t, "succeeded", completions[0].Status())
 }
 
 func TestDiscardedShellQueuesNoCompletion(t *testing.T) {

@@ -336,15 +336,7 @@ func (bs *BackgroundShell) MarkBackgrounded(sessionID string) {
 	finished := bs.finished
 	bs.notifyMu.Unlock()
 
-	publishJobEvent(JobEvent{
-		Type:        JobStarted,
-		ShellID:     bs.ID,
-		SessionID:   sessionID,
-		Command:     bs.Command,
-		Description: bs.Description,
-		WorkingDir:  bs.WorkingDir,
-		StartedAt:   bs.StartedAt,
-	})
+	publishJobEvent(JobEvent{Type: JobStarted, ShellID: bs.ID, SessionID: sessionID})
 
 	if finished {
 		bs.emitCompletion()
@@ -397,7 +389,6 @@ func (bs *BackgroundShell) emitCompletion() {
 		SessionID:   sessionID,
 		Command:     bs.Command,
 		Description: bs.Description,
-		WorkingDir:  bs.WorkingDir,
 		StartedAt:   bs.StartedAt,
 		CompletedAt: time.Unix(bs.completedAt.Load(), 0),
 		ExitCode:    ExitCode(exitErr),
@@ -409,18 +400,7 @@ func (bs *BackgroundShell) emitCompletion() {
 	}
 	bs.notifyMu.Unlock()
 
-	publishJobEvent(JobEvent{
-		Type:        JobCompleted,
-		ShellID:     completion.ShellID,
-		SessionID:   completion.SessionID,
-		Command:     completion.Command,
-		Description: completion.Description,
-		WorkingDir:  completion.WorkingDir,
-		StartedAt:   completion.StartedAt,
-		CompletedAt: completion.CompletedAt,
-		ExitCode:    completion.ExitCode,
-		Interrupted: completion.Interrupted,
-	})
+	publishJobEvent(JobEvent{Type: JobCompleted, ShellID: completion.ShellID, SessionID: completion.SessionID})
 }
 
 // completionOutput keeps the tail, where a run puts its verdict.
@@ -452,12 +432,7 @@ func (m *BackgroundShellManager) Remove(id string) error {
 	if !ok {
 		return fmt.Errorf("%w: %s", ErrBackgroundShellNotFound, id)
 	}
-	publishJobEvent(JobEvent{
-		Type:      JobRemoved,
-		ShellID:   shell.ID,
-		SessionID: shell.SessionID(),
-		Command:   shell.Command,
-	})
+	publishJobEvent(JobEvent{Type: JobRemoved, ShellID: shell.ID, SessionID: shell.SessionID()})
 	return nil
 }
 
@@ -472,12 +447,7 @@ func (m *BackgroundShellManager) Kill(id string) error {
 	shell.DiscardCompletionNotice()
 	shell.cancel()
 	<-shell.done
-	publishJobEvent(JobEvent{
-		Type:      JobRemoved,
-		ShellID:   shell.ID,
-		SessionID: shell.SessionID(),
-		Command:   shell.Command,
-	})
+	publishJobEvent(JobEvent{Type: JobRemoved, ShellID: shell.ID, SessionID: shell.SessionID()})
 	return nil
 }
 

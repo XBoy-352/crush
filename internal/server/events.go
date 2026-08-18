@@ -104,15 +104,9 @@ func wrapEvent(ev any) *pubsub.Payload {
 		return envelope(pubsub.PayloadTypeBackgroundJobEvent, pubsub.Event[proto.BackgroundJobEvent]{
 			Type: e.Type,
 			Payload: proto.BackgroundJobEvent{
-				Type:        string(e.Payload.Type),
-				ShellID:     e.Payload.ShellID,
-				SessionID:   e.Payload.SessionID,
-				Command:     e.Payload.Command,
-				Description: e.Payload.Description,
-				StartedAt:   e.Payload.StartedAt,
-				CompletedAt: e.Payload.CompletedAt,
-				ExitCode:    e.Payload.ExitCode,
-				Interrupted: e.Payload.Interrupted,
+				Type:      string(e.Payload.Type),
+				ShellID:   e.Payload.ShellID,
+				SessionID: e.Payload.SessionID,
 			},
 		})
 	case pubsub.Event[message.Message]:
