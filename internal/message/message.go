@@ -429,13 +429,18 @@ func (s *service) flushOne(ctx context.Context, id string, syncCaller bool) erro
 		// finished, reasoning ended — use the bounded must-deliver
 		// path so they never get dropped under channel contention.
 		if isTerminal {
-			// Detach from ctx's deadline: on the async path ctx is
-			// bounded by asyncFlushTimeout, and the broker's ctx.Done
-			// branch bails silently (no drop count, no log). The
-			// broker applies its own per-subscriber timeout, so the
-			// publish stays bounded without inheriting the write's
-			// leftover budget.
-			s.PublishMustDeliver(context.WithoutCancel(ctx), pubsub.UpdatedEvent, snap)
+			// On the timer-fired path ctx carries asyncFlushTimeout,
+			// and the broker's ctx.Done branch bails silently (no drop
+			// count, no log) — so a write that ate most of the budget
+			// would drop the event invisibly. Detach the publish from
+			// that deadline; the broker still bounds it per subscriber.
+			// Sync callers keep their own ctx: a caller that really is
+			// cancelled must still be able to abandon the publish.
+			publishCtx := ctx
+			if !syncCaller {
+				publishCtx = context.WithoutCancel(ctx)
+			}
+			s.PublishMustDeliver(publishCtx, pubsub.UpdatedEvent, snap)
 		} else {
 			s.Publish(pubsub.UpdatedEvent, snap)
 		}
