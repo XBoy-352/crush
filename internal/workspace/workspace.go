@@ -158,6 +158,8 @@ type Workspace interface {
 	// ListBackgroundJobs returns the jobs oldest first. It never returns
 	// output: see proto.BackgroundJob.
 	ListBackgroundJobs(ctx context.Context) ([]proto.BackgroundJob, error)
+	// RunningBackgroundJobsCount returns the number of active running background jobs.
+	RunningBackgroundJobsCount(ctx context.Context) int
 	// KillBackgroundJob terminates one job by ID.
 	KillBackgroundJob(ctx context.Context, jobID string) error
 	AgentIsBusy() bool

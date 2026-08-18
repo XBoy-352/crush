@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/logo"
+	"github.com/charmbracelet/crush/internal/ui/styles"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/ultraviolet/layout"
 )
@@ -94,19 +95,30 @@ func (m *UI) updateSidebarScrollState() {
 	contentHeight := contentRect.Dy()
 
 	// Render all items without truncation; virtual scrolling handles overflow.
+	var jobsSection string
+	if m.runningJobsCount > 0 {
+		title := common.Section(t, "Background Jobs", contentWidth)
+		msg := t.Header.Percentage.Render(fmt.Sprintf("%s %d active (/jobs to view)", styles.SpinnerIcon, m.runningJobsCount))
+		jobsSection = lipgloss.NewStyle().Width(contentWidth).Render(fmt.Sprintf("%s\n\n%s", title, msg))
+	}
+
 	lspSection := m.lspInfo(contentWidth, len(m.lspStates), true)
 	mcpSection := m.mcpInfo(contentWidth, mcpCount(m.com.Config().MCP.Sorted(), m.mcpStates), true)
 	skillsSection := m.skillsInfo(contentWidth, len(m.skillStatusItems()), true)
 	filesSection := m.filesInfo(m.com.Workspace.WorkingDir(), contentWidth, fileChangeCount(m.sessionFiles), true)
 
 	// Build the scrollable content.
-	content := lipgloss.JoinVertical(
-		lipgloss.Left,
+	contentBlocks := []string{
 		title,
 		"",
 		cwd,
 		"",
 		m.modelInfo(contentWidth),
+	}
+	if jobsSection != "" {
+		contentBlocks = append(contentBlocks, "", jobsSection)
+	}
+	contentBlocks = append(contentBlocks,
 		"",
 		filesSection,
 		"",
@@ -116,6 +128,7 @@ func (m *UI) updateSidebarScrollState() {
 		"",
 		skillsSection,
 	)
+	content := lipgloss.JoinVertical(lipgloss.Left, contentBlocks...)
 
 	totalLines := strings.Count(content, "\n") + 1
 	m.sidebarContent = content

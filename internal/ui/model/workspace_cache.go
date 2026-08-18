@@ -25,6 +25,7 @@ package model
 // Update, no model mutation inside commands).
 
 import (
+	"context"
 	"slices"
 	"time"
 
@@ -76,6 +77,7 @@ type busyStateMsg struct {
 	yolo               bool
 	plan               bool
 	hasForegroundWaits bool
+	runningJobs        int
 	// ready/model memoize the coordinator readiness and selected model,
 	// fetched by the same probe so the sidebar/landing model info renders
 	// from memoized state. Zero (and ignored) when ready is false.
@@ -153,6 +155,7 @@ func (m *UI) dispatchBusyRefresh() tea.Cmd {
 	sessionID := m.currentSessionID()
 	return func() tea.Msg {
 		st := busyStateMsg{gen: gen}
+		st.runningJobs = ws.RunningBackgroundJobsCount(context.Background())
 		if ws.AgentIsReady() {
 			st.ready = true
 			st.agentBusy = ws.AgentIsBusy()
@@ -204,6 +207,7 @@ func (m *UI) applyBusyState(msg busyStateMsg) []tea.Cmd {
 	m.yoloCache.set(msg.yolo)
 	m.planCache.set(msg.plan)
 	m.fgWaitCache.set(msg.hasForegroundWaits)
+	m.runningJobsCount = msg.runningJobs
 	m.agentReady = msg.ready
 	m.agentModel = msg.model
 	if prevYolo != msg.yolo || prevPlan != msg.plan {

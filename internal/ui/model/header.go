@@ -72,6 +72,7 @@ func (h *header) drawHeader(
 	detailsOpen bool,
 	width int,
 	lspErrorCount int,
+	runningJobsCount int,
 	hyperCredits *int,
 ) {
 	t := h.com.Styles
@@ -99,6 +100,7 @@ func (h *header) drawHeader(
 		h.com,
 		session,
 		lspErrorCount,
+		runningJobsCount,
 		detailsOpen,
 		availDetailWidth,
 		hyperCredits,
@@ -131,6 +133,7 @@ func renderHeaderDetails(
 	com *common.Common,
 	session *session.Session,
 	lspErrorCount int,
+	runningJobsCount int,
 	detailsOpen bool,
 	availWidth int,
 	hyperCredits *int,
@@ -141,6 +144,14 @@ func renderHeaderDetails(
 
 	if lspErrorCount > 0 {
 		parts = append(parts, t.LSP.ErrorDiagnostic.Render(fmt.Sprintf("%s%d", styles.LSPErrorIcon, lspErrorCount)))
+	}
+
+	if runningJobsCount > 0 {
+		jobWord := "jobs"
+		if runningJobsCount == 1 {
+			jobWord = "job"
+		}
+		parts = append(parts, t.Header.Percentage.Render(fmt.Sprintf("⚙ %d %s", runningJobsCount, jobWord)))
 	}
 
 	agentCfg := com.Config().Agents[config.AgentCoder]
