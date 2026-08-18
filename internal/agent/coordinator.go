@@ -152,10 +152,9 @@ type CoordinatorOptions struct {
 	RunComplete pubsub.Publisher[notify.RunComplete]
 	Skills      *skills.Manager
 	Interactive bool
-	// Lifetime bounds background work the coordinator owns (the job
-	// completion watcher). It must outlive the constructor's ctx, which
-	// at the HTTP boundary is scoped to the request that created the
-	// agent. Falls back to ctx when unset.
+	// Lifetime bounds the coordinator's own background work. It must
+	// outlive the constructor's ctx, which at the HTTP boundary is scoped
+	// to the request that created the agent. Falls back to ctx.
 	Lifetime context.Context
 }
 
@@ -209,9 +208,8 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 	c.currentAgent = agent
 	c.agents[config.AgentCoder] = agent
 
-	// Interactive only: a non-interactive run ends at its own
-	// RunComplete and kills surviving jobs on shutdown, so waking the
-	// agent afterwards has nobody left to hear it.
+	// Interactive only: a non-interactive run ends at its own RunComplete
+	// and kills surviving jobs, so a later wake has nobody to hear it.
 	if c.interactive && !opts.Config.Config().Options.DisableBackgroundJobNotifications {
 		lifetime := opts.Lifetime
 		if lifetime == nil {
@@ -237,12 +235,10 @@ func (c *coordinator) RunAccepted(ctx context.Context, accept *AcceptedRun, sess
 // Accepted so sessionAgent.Run can consume the accept reservation under
 // dispatchMu; when nil (the in-process/local path) no accept tracking
 // applies.
-// runOptions carries per-run behavior that is not part of the Coordinator
-// interface.
+// runOptions carries per-run behavior not in the Coordinator interface.
 type runOptions struct {
-	// synthetic marks a turn the agent started for itself (a background
-	// job completion notice) rather than one the user submitted. Such a
-	// turn skips the UserPromptSubmit hooks, which exist to inspect and
+	// synthetic marks a turn the agent started for itself (a job notice).
+	// It skips the UserPromptSubmit hooks, which exist to inspect and
 	// rewrite what the user typed.
 	synthetic bool
 }

@@ -24,8 +24,7 @@ func waitForJobNotice(t *testing.T, sessionID string) []shell.JobCompletion {
 	return nil
 }
 
-// A command the tool hands back as a background job announces itself when
-// it exits, so the agent never has to poll job_output.
+// A command handed back as a job announces itself when it exits.
 func TestBashBackgroundJobAnnouncesCompletion(t *testing.T) {
 	sessionID := "session-announce"
 	t.Cleanup(func() { shell.TakeJobCompletions(sessionID) })
@@ -51,8 +50,8 @@ func TestBashBackgroundJobAnnouncesCompletion(t *testing.T) {
 	require.Contains(t, completions[0].Output, "finished")
 }
 
-// A command that finishes inside the foreground wait returns its output
-// directly, so announcing it would repeat what the agent just read.
+// One that finishes inside the foreground wait already returned its
+// output, so announcing it would repeat what the agent just read.
 func TestBashForegroundCommandAnnouncesNothing(t *testing.T) {
 	sessionID := "session-foreground"
 	tool := newBashToolForTest(t.TempDir())

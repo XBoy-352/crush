@@ -10,10 +10,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// waitForJobNotice polls the session's messages for the completion notice.
-// The delivery is asynchronous by design: the job finishes on its own
-// goroutine and the notice reaches the agent through the normal dispatch
-// path.
+// waitForJobNotice polls the session's messages for the notice; delivery
+// is asynchronous by design.
 func waitForJobNotice(t *testing.T, coord *coordinator, sessionID string) message.Message {
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
@@ -31,9 +29,8 @@ func waitForJobNotice(t *testing.T, coord *coordinator, sessionID string) messag
 	return message.Message{}
 }
 
-// A job that finishes while the session is idle must reach the agent on
-// its own. Nothing here submits a prompt: the completion is the only
-// trigger, which is the whole point of the notice.
+// A job finishing while the session is idle must reach the agent on its
+// own. Nothing here submits a prompt — the completion is the only trigger.
 func TestBackgroundJobCompletionWakesIdleAgent(t *testing.T) {
 	coord := newGateTestCoordinator(t, true)
 
@@ -58,8 +55,7 @@ func TestBackgroundJobCompletionWakesIdleAgent(t *testing.T) {
 	require.Zero(t, shell.PendingJobCompletions(sess.ID))
 }
 
-// Jobs finishing together are batched into one notice rather than waking
-// the agent once per job.
+// Jobs finishing together are batched, not one wake per job.
 func TestBackgroundJobCompletionsAreBatched(t *testing.T) {
 	coord := newGateTestCoordinator(t, true)
 
@@ -85,10 +81,8 @@ func TestBackgroundJobCompletionsAreBatched(t *testing.T) {
 	}
 }
 
-// Job notices are process-global while a server process runs a coordinator
-// per workspace, so every watcher sees every completion. One that does not
-// own the session must leave the notice alone: taking and discarding it
-// would lose a sibling workspace's result.
+// Every watcher sees every completion, so one that does not own the
+// session must leave the notice alone rather than take and discard it.
 func TestBackgroundJobCompletionIsLeftForItsOwner(t *testing.T) {
 	coord := newGateTestCoordinator(t, true)
 	other := "session-owned-by-another-workspace"

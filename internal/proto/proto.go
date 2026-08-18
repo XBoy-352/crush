@@ -172,8 +172,8 @@ type ShellCommandResponse struct {
 // job_output tool, which fetches exactly one job on demand.
 type BackgroundJob struct {
 	ID string `json:"id"`
-	// SessionID is the session whose agent started the job, empty for a
-	// shell that was never handed back as a background job.
+	// SessionID is the session whose agent started the job, empty if the
+	// shell was never handed back as one.
 	SessionID   string    `json:"session_id,omitempty"`
 	Command     string    `json:"command"`
 	Description string    `json:"description,omitempty"`
@@ -181,8 +181,8 @@ type BackgroundJob struct {
 	Done        bool      `json:"done"`
 }
 
-// BackgroundJobEvent is the wire representation of shell.JobEvent. It
-// carries no output, for the reasons documented on BackgroundJob.
+// BackgroundJobEvent is the wire form of shell.JobEvent. No output, for
+// the reasons on BackgroundJob.
 type BackgroundJobEvent struct {
 	Type        string    `json:"type"`
 	ShellID     string    `json:"shell_id"`

@@ -15,18 +15,17 @@ import (
 type JobEventType string
 
 const (
-	// JobStarted fires when a shell is handed back to the agent as a
-	// background job, not when it starts running: a command that finishes
-	// inside the bash tool's foreground wait never becomes a visible job.
+	// JobStarted fires when a shell is handed back as a job, not when it
+	// starts running.
 	JobStarted JobEventType = "started"
 	// JobCompleted fires when a backgrounded shell exits.
 	JobCompleted JobEventType = "completed"
-	// JobRemoved fires when a job leaves the manager (killed or reaped).
+	// JobRemoved fires when a job is killed or reaped.
 	JobRemoved JobEventType = "removed"
 )
 
-// JobEvent describes one lifecycle transition. It carries no output, for
-// the reasons documented on proto.BackgroundJob.
+// JobEvent describes one lifecycle transition. No output, for the reasons
+// on proto.BackgroundJob.
 type JobEvent struct {
 	Type        JobEventType
 	ShellID     string
@@ -40,8 +39,7 @@ type JobEvent struct {
 	Interrupted bool
 }
 
-// JobCompletion is the record handed to the agent when a background job it
-// launched exits.
+// JobCompletion is what the agent is told when a job it launched exits.
 type JobCompletion struct {
 	ShellID     string
 	SessionID   string
@@ -52,8 +50,7 @@ type JobCompletion struct {
 	CompletedAt time.Time
 	ExitCode    int
 	Interrupted bool
-	// Output is the tail of the combined streams, capped at
-	// completionOutputLimit. The full log stays behind job_output.
+	// Output is the tail of both streams; the full log stays in job_output.
 	Output string
 }
 
@@ -84,15 +81,11 @@ func (c JobCompletion) Status() string {
 
 const completionOutputLimit = 8000
 
-// maxPendingCompletionsPerSession bounds the mailbox; oldest notices are
-// dropped first. Every job stays listed and readable via job_output.
+// Oldest notices are dropped first; every job stays readable via job_output.
 const maxPendingCompletionsPerSession = 50
 
-// maxMailboxSessions bounds how many sessions the mailbox tracks at once.
-// Nothing drains a session whose agent never watches for completions (a
-// non-interactive run, or notifications switched off), so without a cap a
-// long-lived server process would accumulate a queue per session forever.
-// Eviction is oldest-first by arrival.
+// Nothing drains a session no agent watches (non-interactive, or
+// notifications off), so cap the sessions tracked and evict oldest-first.
 const maxMailboxSessions = 128
 
 var (
@@ -107,8 +100,8 @@ func jobEvents() *pubsub.Broker[JobEvent] {
 	return jobBroker
 }
 
-// SubscribeJobEvents returns a channel of job lifecycle events, so the UI
-// can render job state from pushed transitions instead of polling.
+// SubscribeJobEvents lets the UI render job state from pushed transitions
+// instead of polling.
 func SubscribeJobEvents(ctx context.Context) <-chan pubsub.Event[JobEvent] {
 	return jobEvents().Subscribe(ctx)
 }
@@ -117,10 +110,9 @@ func publishJobEvent(ev JobEvent) {
 	jobEvents().Publish(pubsub.UpdatedEvent, ev)
 }
 
-// completionMailbox holds undelivered completions keyed by owning session.
-// It buffers because a job can finish mid-turn (folded into the next
-// step), between turns (wakes the agent), or during shutdown (dropped) —
-// none of which the shell package should have to know about.
+// completionMailbox holds undelivered completions per owning session. It
+// buffers because a job can finish mid-turn, between turns, or during
+// shutdown, and this package should not have to know which.
 type completionMailbox struct {
 	mu sync.Mutex
 	// order lists the tracked sessions oldest first, for eviction.
@@ -195,9 +187,8 @@ func (b *completionMailbox) clear(sessionID, shellID string) {
 	b.pending[sessionID] = kept
 }
 
-// TakeJobCompletions removes and returns a session's undelivered notices,
-// oldest first. The drain is destructive so exactly one caller delivers
-// each notice: folded into a step, or turned into a waking prompt.
+// TakeJobCompletions removes and returns a session's notices, oldest
+// first. Destructive, so exactly one caller delivers each notice.
 func TakeJobCompletions(sessionID string) []JobCompletion {
 	if sessionID == "" {
 		return nil
@@ -205,8 +196,7 @@ func TakeJobCompletions(sessionID string) []JobCompletion {
 	return mailbox().take(sessionID)
 }
 
-// RestoreJobCompletions puts drained notices back, for a delivery attempt
-// that failed after taking them.
+// RestoreJobCompletions puts notices back after a failed delivery.
 func RestoreJobCompletions(completions []JobCompletion) {
 	for _, c := range completions {
 		if c.SessionID != "" {
@@ -215,8 +205,7 @@ func RestoreJobCompletions(completions []JobCompletion) {
 	}
 }
 
-// PendingJobCompletions reports how many notices are waiting, without
-// consuming them.
+// PendingJobCompletions counts waiting notices without consuming them.
 func PendingJobCompletions(sessionID string) int {
 	if sessionID == "" {
 		return 0
@@ -232,9 +221,8 @@ func DiscardJobCompletion(sessionID, shellID string) {
 	mailbox().clear(sessionID, shellID)
 }
 
-// FormatJobCompletions renders notices as the text handed to the model.
-// The tag is greppable so the model can tell an automatic notice from
-// something the user typed.
+// FormatJobCompletions renders notices for the model. The tag is greppable
+// so it reads as automatic, not as something the user typed.
 func FormatJobCompletions(completions []JobCompletion) string {
 	var b strings.Builder
 	for i, c := range completions {

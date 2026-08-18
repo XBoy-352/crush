@@ -67,8 +67,7 @@ func NewJobOutputTool() fantasy.AgentTool {
 
 			stdout, stderr, done, err := bgShell.GetOutput()
 			if done {
-				// The agent has the outcome now; a later notice would
-				// just repeat it.
+				// The agent has the outcome; a notice would repeat it.
 				bgShell.DiscardCompletionNotice()
 			}
 

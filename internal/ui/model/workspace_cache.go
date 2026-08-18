@@ -216,9 +216,8 @@ func (m *UI) applyBusyState(msg busyStateMsg) []tea.Cmd {
 
 	var cmds []tea.Cmd
 	if m.jobsCountedFor != m.currentSessionID() {
-		// Session switched (or this is the first probe): the counts are
-		// per-session, so re-scope them. Job events keep them fresh from
-		// here on.
+		// Session switched, or first probe: counts are per-session, so
+		// re-scope. Job events keep them fresh from here.
 		if cmd := m.requestJobsRefresh(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}

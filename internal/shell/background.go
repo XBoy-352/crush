@@ -238,10 +238,9 @@ type BackgroundShell struct {
 	exitErr     error
 	completedAt atomic.Int64 // Unix timestamp when job completed (0 if still running)
 
-	// notifyMu guards the notice bookkeeping below: the exit goroutine and
-	// the bash tool's hand-off both decide whether this shell owes its
-	// session a completion notice, and each needs the other's decision
-	// already visible.
+	// notifyMu guards the notice bookkeeping: the exit goroutine and the
+	// tool's hand-off both decide whether a notice is owed, and each needs
+	// the other's decision visible.
 	notifyMu     sync.Mutex
 	sessionID    string
 	backgrounded bool
@@ -309,10 +308,9 @@ func (m *BackgroundShellManager) Start(ctx context.Context, workingDir string, b
 	m.shells.Set(id, bgShell)
 
 	go func() {
-		// LIFO: done closes first, then the notice goes out — a woken
-		// subscriber reads output through GetOutput, which reports done
-		// off that channel. Both deferred so a panic in ExecStream cannot
-		// leave a waiter blocked forever.
+		// LIFO: done closes first, since a woken subscriber reads output
+		// through GetOutput, which reports done off that channel. Deferred
+		// so a panic cannot leave a waiter blocked forever.
 		defer bgShell.onExit()
 		defer close(bgShell.done)
 
@@ -325,14 +323,12 @@ func (m *BackgroundShellManager) Start(ctx context.Context, workingDir string, b
 	return bgShell, nil
 }
 
-// MarkBackgrounded records that the bash tool handed this shell back to
-// the agent as a job owned by sessionID. Only a marked shell owes a
-// completion notice: a command that finished inside the foreground wait
-// already returned its output in the tool result.
+// MarkBackgrounded records that the tool handed this shell back as a job
+// owned by sessionID. Only a marked shell owes a notice: one that finished
+// inside the foreground wait already returned its output.
 //
-// The already-finished branch is not defensive — the shell can exit
-// between the tool's last GetOutput and this call, by which point the exit
-// goroutine has concluded there was nobody to notify.
+// The already-finished branch is not defensive — the shell can exit before
+// this call, by which point the exit goroutine found nobody to notify.
 func (bs *BackgroundShell) MarkBackgrounded(sessionID string) {
 	bs.notifyMu.Lock()
 	bs.backgrounded = true
@@ -355,21 +351,18 @@ func (bs *BackgroundShell) MarkBackgrounded(sessionID string) {
 	}
 }
 
-// SessionID returns the session that owns this job, or "" when the shell
-// was never handed back to an agent as a background job.
+// SessionID returns the owning session, or "" if never backgrounded.
 func (bs *BackgroundShell) SessionID() string {
 	bs.notifyMu.Lock()
 	defer bs.notifyMu.Unlock()
 	return bs.sessionID
 }
 
-// DiscardCompletionNotice suppresses this shell's notice and drops any
-// already queued, for when the agent learns the outcome by other means
-// (an explicit job_output on a finished job, or a job_kill).
+// DiscardCompletionNotice suppresses the notice and drops any already
+// queued, for when the agent learns the outcome by other means.
 func (bs *BackgroundShell) DiscardCompletionNotice() {
-	// The mailbox drop happens under notifyMu, so it cannot slip between
-	// a concurrent emit's suppression check and its enqueue and leave the
-	// notice behind.
+	// Under notifyMu, so it cannot slip between a concurrent emit's
+	// suppression check and its enqueue.
 	bs.notifyMu.Lock()
 	defer bs.notifyMu.Unlock()
 	bs.suppressed = true
@@ -388,8 +381,7 @@ func (bs *BackgroundShell) onExit() {
 	}
 }
 
-// emitCompletion queues the notice and publishes JobCompleted, at most
-// once per shell.
+// emitCompletion queues the notice and publishes JobCompleted, once.
 func (bs *BackgroundShell) emitCompletion() {
 	bs.notifyMu.Lock()
 	if bs.notified || bs.suppressed {
@@ -431,8 +423,7 @@ func (bs *BackgroundShell) emitCompletion() {
 	})
 }
 
-// completionOutput joins the streams and keeps the tail, where a build or
-// test run puts its verdict.
+// completionOutput keeps the tail, where a run puts its verdict.
 func completionOutput(stdout, stderr string) string {
 	combined := strings.TrimSpace(stdout)
 	if e := strings.TrimSpace(stderr); e != "" {
@@ -477,7 +468,7 @@ func (m *BackgroundShellManager) Kill(id string) error {
 		return fmt.Errorf("%w: %s", ErrBackgroundShellNotFound, id)
 	}
 
-	// A deliberate kill is not news: whoever asked for it already knows.
+	// A deliberate kill is not news; the caller already knows.
 	shell.DiscardCompletionNotice()
 	shell.cancel()
 	<-shell.done
@@ -540,10 +531,9 @@ func (m *BackgroundShellManager) RunningCount() int {
 	return count
 }
 
-// RunningCounts splits the active jobs into those owned by sessionID and
-// those owned by any other session. The manager is process-global, so a
-// caller rendering one session's state needs the split to avoid claiming
-// another session's job as its own.
+// RunningCounts splits active jobs into sessionID's and everyone else's.
+// The manager is process-global, so a caller rendering one session needs
+// the split to avoid claiming another session's job.
 func (m *BackgroundShellManager) RunningCounts(sessionID string) (own, other int) {
 	for shell := range m.shells.Seq() {
 		if shell.IsDone() {
@@ -587,7 +577,7 @@ func (m *BackgroundShellManager) KillAll(ctx context.Context) {
 	var wg sync.WaitGroup
 	for _, shell := range shells {
 		wg.Go(func() {
-			// Shutdown: nobody is left to read a completion notice.
+			// Shutdown: nobody is left to read a notice.
 			shell.DiscardCompletionNotice()
 			shell.cancel()
 			select {

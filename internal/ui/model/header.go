@@ -163,9 +163,8 @@ func renderHeaderDetails(
 		parts = append(parts, hc)
 	}
 
-	// Appended after the context percentage and credits: the details
-	// string is truncated from the right, so an earlier position would
-	// push pre-existing information off a narrow header.
+	// After the percentage and credits: details truncate from the right,
+	// so an earlier slot would push existing information off.
 	if runningJobsCount > 0 {
 		jobWord := "jobs"
 		if runningJobsCount == 1 {

@@ -9,8 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// waitForCompletions polls the mailbox because the notice is queued by the
-// shell's exit goroutine, not by the caller that started it.
+// The notice is queued by the shell's exit goroutine, so poll for it.
 func waitForCompletions(t *testing.T, sessionID string, want int) []JobCompletion {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -46,8 +45,8 @@ func TestBackgroundedShellQueuesCompletion(t *testing.T) {
 	require.Equal(t, "greeting", c.Description)
 }
 
-// A command that finishes inside the bash tool's foreground wait is never
-// marked, and must not be announced: the tool already returned its output.
+// A command finishing inside the foreground wait is never marked, and
+// must not be announced: the tool already returned its output.
 func TestUnmarkedShellQueuesNoCompletion(t *testing.T) {
 	t.Parallel()
 	manager := newBackgroundShellManager()
@@ -61,9 +60,8 @@ func TestUnmarkedShellQueuesNoCompletion(t *testing.T) {
 	require.Empty(t, bgShell.SessionID())
 }
 
-// The shell can exit before the tool decides to hand it back. The notice
-// still has to be queued, otherwise a job that finishes in that window is
-// silently lost.
+// A shell can exit before the tool hands it back; a job finishing in that
+// window must still be announced.
 func TestCompletionQueuedWhenShellExitsBeforeHandoff(t *testing.T) {
 	t.Parallel()
 	manager := newBackgroundShellManager()
@@ -96,8 +94,7 @@ func TestDiscardedShellQueuesNoCompletion(t *testing.T) {
 	require.Zero(t, PendingJobCompletions(sessionID))
 }
 
-// A notice already queued when the agent collects the result itself is
-// dropped, so it is not told twice.
+// A queued notice is dropped once the agent collects the result itself.
 func TestDiscardClearsQueuedCompletion(t *testing.T) {
 	t.Parallel()
 	manager := newBackgroundShellManager()
@@ -170,8 +167,7 @@ func TestRunningCountsSplitsBySession(t *testing.T) {
 	require.Equal(t, 1, other)
 }
 
-// Sessions nobody drains must not accumulate forever in a long-lived
-// server process.
+// Sessions nobody drains must not accumulate forever.
 func TestMailboxEvictsOldestSessions(t *testing.T) {
 	b := &completionMailbox{pending: make(map[string][]JobCompletion)}
 	for i := range maxMailboxSessions + 10 {
