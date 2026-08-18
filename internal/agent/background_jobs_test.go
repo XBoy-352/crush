@@ -85,17 +85,21 @@ func TestBackgroundJobCompletionsAreBatched(t *testing.T) {
 	}
 }
 
-// A notice for a session that no longer exists is dropped rather than
-// dispatched against a missing session.
-func TestBackgroundJobCompletionForUnknownSessionIsDropped(t *testing.T) {
+// Job notices are process-global while a server process runs a coordinator
+// per workspace, so every watcher sees every completion. One that does not
+// own the session must leave the notice alone: taking and discarding it
+// would lose a sibling workspace's result.
+func TestBackgroundJobCompletionIsLeftForItsOwner(t *testing.T) {
 	coord := newGateTestCoordinator(t, true)
+	other := "session-owned-by-another-workspace"
+	t.Cleanup(func() { shell.TakeJobCompletions(other) })
 
 	shell.RestoreJobCompletions([]shell.JobCompletion{{
 		ShellID:   "0FF",
-		SessionID: "does-not-exist",
+		SessionID: other,
 		Command:   "true",
 	}})
 
-	coord.deliverJobCompletions(t.Context(), "does-not-exist")
-	require.Zero(t, shell.PendingJobCompletions("does-not-exist"))
+	coord.deliverJobCompletions(t.Context(), other)
+	require.Equal(t, 1, shell.PendingJobCompletions(other))
 }

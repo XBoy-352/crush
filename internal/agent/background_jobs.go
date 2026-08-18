@@ -65,13 +65,19 @@ func (c *coordinator) watchBackgroundJobs(ctx context.Context) {
 // to the agent as one prompt. The drain is destructive, so a failed
 // dispatch would lose the notice: on error the completions go back into
 // the mailbox for the next attempt or the next turn.
+//
+// Ownership is checked before the drain, never after. The job registry and
+// its notices are process-global while a server process runs a coordinator
+// per workspace, so every watcher sees every completion. A watcher that
+// drained first would take a sibling workspace's notice and then discard
+// it for belonging to a session it has never heard of.
 func (c *coordinator) deliverJobCompletions(ctx context.Context, sessionID string) {
-	completions := shell.TakeJobCompletions(sessionID)
-	if len(completions) == 0 {
+	if _, err := c.sessions.Get(ctx, sessionID); err != nil {
+		slog.Debug("Ignoring background job notice for a session this agent does not own", "session", sessionID, "error", err)
 		return
 	}
-	if _, err := c.sessions.Get(ctx, sessionID); err != nil {
-		slog.Debug("Dropping background job notice for unknown session", "session", sessionID, "error", err)
+	completions := shell.TakeJobCompletions(sessionID)
+	if len(completions) == 0 {
 		return
 	}
 
