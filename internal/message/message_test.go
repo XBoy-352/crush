@@ -693,3 +693,108 @@ func TestUpdate_StructuralFlushUsesMustDeliver(t *testing.T) {
 		})
 	}
 }
+
+// TestAsyncFlush_TimeoutRestoresDirty reproduces the production wedge
+// where a detached timer-fired flush hangs inside UpdateMessage and
+// would otherwise hold the single shared DB connection (and with it the
+// WAL write lock) forever. The async-flush timeout must abort the write,
+// restore the dirty bit, and let a later synchronous flush retry and
+// land the payload.
+func TestAsyncFlush_TimeoutRestoresDirty(t *testing.T) {
+	t.Parallel()
+
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	q := db.New(conn)
+	sessions := session.NewService(q, conn)
+	sess, err := sessions.Create(t.Context(), "test")
+	require.NoError(t, err)
+
+	// Block UpdateMessage until released. The async flush will hit
+	// this and hang past the (short) async timeout.
+	blocked := &blockingUpdateQuerier{
+		Querier: q,
+		release: make(chan struct{}),
+		started: make(chan struct{}),
+		aborted: make(chan struct{}),
+	}
+	svc := NewService(blocked,
+		WithDebounce(10*time.Millisecond),
+		WithAsyncFlushTimeout(100*time.Millisecond),
+	)
+
+	msg, err := svc.Create(t.Context(), sess.ID, CreateMessageParams{Role: Assistant})
+	require.NoError(t, err)
+	msg.AppendContent("payload")
+	require.NoError(t, svc.Update(t.Context(), msg))
+
+	// Wait for the timer-fired flush to enter the blocked write.
+	blocked.waitStarted(t)
+
+	// The async flush must abort on its own timeout instead of hanging
+	// forever. Wait for that abort to actually happen before releasing
+	// the block — releasing first would let the write succeed normally
+	// and the test would pass without ever exercising the timeout.
+	blocked.waitAborted(t)
+
+	// Now release, so the retry below can reach the real write.
+	close(blocked.release)
+
+	// The dirty bit must have been restored, so a synchronous flush
+	// retries and lands the payload even though the async attempt was
+	// aborted.
+	require.Eventually(t, func() bool {
+		err := svc.Flush(t.Context(), msg.ID)
+		return err == nil
+	}, time.Second, 5*time.Millisecond, "sync flush should retry after aborted async flush")
+
+	got, err := svc.Get(t.Context(), msg.ID)
+	require.NoError(t, err)
+	require.Equal(t, "payload", got.Content().Text)
+}
+
+// blockingUpdateQuerier wraps a [db.Querier] and blocks UpdateMessage
+// until release is closed, mimicking a write wedged on the shared DB
+// connection.
+type blockingUpdateQuerier struct {
+	db.Querier
+	release   chan struct{}
+	started   chan struct{}
+	aborted   chan struct{}
+	startOnce sync.Once
+	abortOnce sync.Once
+}
+
+func (s *blockingUpdateQuerier) UpdateMessage(ctx context.Context, arg db.UpdateMessageParams) error {
+	s.startOnce.Do(func() { close(s.started) })
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+		s.abortOnce.Do(func() { close(s.aborted) })
+		return ctx.Err()
+	}
+	return s.Querier.UpdateMessage(ctx, arg)
+}
+
+func (s *blockingUpdateQuerier) waitStarted(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.started:
+	case <-time.After(time.Second):
+		t.Fatal("async flush never reached UpdateMessage")
+	}
+}
+
+// waitAborted blocks until a write inside the blocking querier gave up
+// on its context. If this times out, the async flush is unbounded —
+// exactly the wedge this test guards against.
+func (s *blockingUpdateQuerier) waitAborted(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.aborted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("async flush was never aborted by its timeout")
+	}
+}

@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -19,6 +21,18 @@ import (
 // (finish/error/cancel/tool-call structural changes) bypass the
 // debounce and flush synchronously.
 const defaultUpdateDebounce = 33 * time.Millisecond
+
+// defaultAsyncFlushTimeout bounds detached timer-fired flushes so a
+// wedged write cannot hold the single shared DB connection (and with it
+// the WAL write lock) forever. On expiry the write is aborted and the
+// dirty bit restored, so the next Update or Flush retries.
+//
+// This is deliberately far below the connection's busy_timeout (30s):
+// these flushes are best-effort coalesced streaming deltas, so giving
+// up early and retrying costs nothing, while the synchronous paths
+// (terminal Update, Flush, FlushAll) run on the caller's context and
+// still get the full busy_timeout budget.
+const defaultAsyncFlushTimeout = 5 * time.Second
 
 type CreateMessageParams struct {
 	Role             MessageRole
@@ -115,6 +129,8 @@ type service struct {
 	q        db.Querier
 	debounce time.Duration
 
+	asyncFlushTimeout time.Duration
+
 	mu      sync.Mutex
 	pending map[string]*pendingState
 }
@@ -131,12 +147,27 @@ func WithDebounce(d time.Duration) ServiceOption {
 	}
 }
 
+// WithAsyncFlushTimeout bounds the context of detached timer-fired
+// flushes so a hung write cannot hold the shared DB connection
+// indefinitely. Intended primarily for tests. Non-positive values are
+// ignored, since a zero timeout would abort every debounced flush
+// before it started.
+func WithAsyncFlushTimeout(d time.Duration) ServiceOption {
+	return func(s *service) {
+		if d <= 0 {
+			return
+		}
+		s.asyncFlushTimeout = d
+	}
+}
+
 func NewService(q db.Querier, opts ...ServiceOption) Service {
 	s := &service{
-		Broker:   pubsub.NewBroker[Message](),
-		q:        q,
-		debounce: defaultUpdateDebounce,
-		pending:  make(map[string]*pendingState),
+		Broker:            pubsub.NewBroker[Message](),
+		q:                 q,
+		debounce:          defaultUpdateDebounce,
+		asyncFlushTimeout: defaultAsyncFlushTimeout,
+		pending:           make(map[string]*pendingState),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -274,8 +305,20 @@ func (s *service) Update(ctx context.Context, msg Message) error {
 		id := msg.ID
 		p.timer = time.AfterFunc(s.debounce, func() {
 			// Detached from caller ctx so a cancelled stream context
-			// does not strand the buffered write.
-			_ = s.flushOne(context.Background(), id, false)
+			// does not strand the buffered write; bounded so a wedged
+			// write cannot hold the shared DB connection forever.
+			flushCtx, cancel := context.WithTimeout(context.Background(), s.asyncFlushTimeout)
+			defer cancel()
+			if err := s.flushOne(flushCtx, id, false); err != nil {
+				// The dirty bit is restored, so the next Update or
+				// Flush retries. Log it anyway: a recurring timeout
+				// here is the signal that a write is wedged on the
+				// shared connection.
+				slog.Warn("async message flush failed",
+					"id", id,
+					"timed_out", errors.Is(err, context.DeadlineExceeded),
+					"error", err)
+			}
 		})
 	}
 	s.mu.Unlock()
@@ -386,7 +429,18 @@ func (s *service) flushOne(ctx context.Context, id string, syncCaller bool) erro
 		// finished, reasoning ended — use the bounded must-deliver
 		// path so they never get dropped under channel contention.
 		if isTerminal {
-			s.PublishMustDeliver(ctx, pubsub.UpdatedEvent, snap)
+			// On the timer-fired path ctx carries asyncFlushTimeout,
+			// and the broker's ctx.Done branch bails silently (no drop
+			// count, no log) — so a write that ate most of the budget
+			// would drop the event invisibly. Detach the publish from
+			// that deadline; the broker still bounds it per subscriber.
+			// Sync callers keep their own ctx: a caller that really is
+			// cancelled must still be able to abandon the publish.
+			publishCtx := ctx
+			if !syncCaller {
+				publishCtx = context.WithoutCancel(ctx)
+			}
+			s.PublishMustDeliver(publishCtx, pubsub.UpdatedEvent, snap)
 		} else {
 			s.Publish(pubsub.UpdatedEvent, snap)
 		}
