@@ -858,6 +858,15 @@
           ],
           "description": "Chat scrollbar visibility",
           "default": "default"
+        },
+        "working_dir_format": {
+          "type": "string",
+          "description": "Format for the working directory shown in the header. Supported placeholders: {cwd} for the path, {user} for the current user, {host} for the hostname.",
+          "default": "{user}@{host}:{cwd}",
+          "examples": [
+            "{cwd}",
+            "{host}:{cwd}"
+          ]
         }
       },
       "additionalProperties": false,
