@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -24,6 +26,12 @@ const defaultUpdateDebounce = 33 * time.Millisecond
 // wedged write cannot hold the single shared DB connection (and with it
 // the WAL write lock) forever. On expiry the write is aborted and the
 // dirty bit restored, so the next Update or Flush retries.
+//
+// This is deliberately far below the connection's busy_timeout (30s):
+// these flushes are best-effort coalesced streaming deltas, so giving
+// up early and retrying costs nothing, while the synchronous paths
+// (terminal Update, Flush, FlushAll) run on the caller's context and
+// still get the full busy_timeout budget.
 const defaultAsyncFlushTimeout = 5 * time.Second
 
 type CreateMessageParams struct {
@@ -141,9 +149,14 @@ func WithDebounce(d time.Duration) ServiceOption {
 
 // WithAsyncFlushTimeout bounds the context of detached timer-fired
 // flushes so a hung write cannot hold the shared DB connection
-// indefinitely. Intended primarily for tests.
+// indefinitely. Intended primarily for tests. Non-positive values are
+// ignored, since a zero timeout would abort every debounced flush
+// before it started.
 func WithAsyncFlushTimeout(d time.Duration) ServiceOption {
 	return func(s *service) {
+		if d <= 0 {
+			return
+		}
 		s.asyncFlushTimeout = d
 	}
 }
@@ -296,7 +309,16 @@ func (s *service) Update(ctx context.Context, msg Message) error {
 			// write cannot hold the shared DB connection forever.
 			flushCtx, cancel := context.WithTimeout(context.Background(), s.asyncFlushTimeout)
 			defer cancel()
-			_ = s.flushOne(flushCtx, id, false)
+			if err := s.flushOne(flushCtx, id, false); err != nil {
+				// The dirty bit is restored, so the next Update or
+				// Flush retries. Log it anyway: a recurring timeout
+				// here is the signal that a write is wedged on the
+				// shared connection.
+				slog.Warn("async message flush failed",
+					"id", id,
+					"timed_out", errors.Is(err, context.DeadlineExceeded),
+					"error", err)
+			}
 		})
 	}
 	s.mu.Unlock()
@@ -407,7 +429,13 @@ func (s *service) flushOne(ctx context.Context, id string, syncCaller bool) erro
 		// finished, reasoning ended — use the bounded must-deliver
 		// path so they never get dropped under channel contention.
 		if isTerminal {
-			s.PublishMustDeliver(ctx, pubsub.UpdatedEvent, snap)
+			// Detach from ctx's deadline: on the async path ctx is
+			// bounded by asyncFlushTimeout, and the broker's ctx.Done
+			// branch bails silently (no drop count, no log). The
+			// broker applies its own per-subscriber timeout, so the
+			// publish stays bounded without inheriting the write's
+			// leftover budget.
+			s.PublishMustDeliver(context.WithoutCancel(ctx), pubsub.UpdatedEvent, snap)
 		} else {
 			s.Publish(pubsub.UpdatedEvent, snap)
 		}

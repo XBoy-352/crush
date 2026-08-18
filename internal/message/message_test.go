@@ -714,7 +714,12 @@ func TestAsyncFlush_TimeoutRestoresDirty(t *testing.T) {
 
 	// Block UpdateMessage until released. The async flush will hit
 	// this and hang past the (short) async timeout.
-	blocked := &blockingUpdateQuerier{Querier: q, release: make(chan struct{}), started: make(chan struct{})}
+	blocked := &blockingUpdateQuerier{
+		Querier: q,
+		release: make(chan struct{}),
+		started: make(chan struct{}),
+		aborted: make(chan struct{}),
+	}
 	svc := NewService(blocked,
 		WithDebounce(10*time.Millisecond),
 		WithAsyncFlushTimeout(100*time.Millisecond),
@@ -728,9 +733,13 @@ func TestAsyncFlush_TimeoutRestoresDirty(t *testing.T) {
 	// Wait for the timer-fired flush to enter the blocked write.
 	blocked.waitStarted(t)
 
-	// The async flush must abort on its timeout instead of hanging
-	// forever. Release the block so the goroutine can finish cleanly;
-	// the timeout already fired by now.
+	// The async flush must abort on its own timeout instead of hanging
+	// forever. Wait for that abort to actually happen before releasing
+	// the block — releasing first would let the write succeed normally
+	// and the test would pass without ever exercising the timeout.
+	blocked.waitAborted(t)
+
+	// Now release, so the retry below can reach the real write.
 	close(blocked.release)
 
 	// The dirty bit must have been restored, so a synchronous flush
@@ -753,7 +762,9 @@ type blockingUpdateQuerier struct {
 	db.Querier
 	release   chan struct{}
 	started   chan struct{}
+	aborted   chan struct{}
 	startOnce sync.Once
+	abortOnce sync.Once
 }
 
 func (s *blockingUpdateQuerier) UpdateMessage(ctx context.Context, arg db.UpdateMessageParams) error {
@@ -761,6 +772,7 @@ func (s *blockingUpdateQuerier) UpdateMessage(ctx context.Context, arg db.Update
 	select {
 	case <-s.release:
 	case <-ctx.Done():
+		s.abortOnce.Do(func() { close(s.aborted) })
 		return ctx.Err()
 	}
 	return s.Querier.UpdateMessage(ctx, arg)
@@ -772,5 +784,17 @@ func (s *blockingUpdateQuerier) waitStarted(t *testing.T) {
 	case <-s.started:
 	case <-time.After(time.Second):
 		t.Fatal("async flush never reached UpdateMessage")
+	}
+}
+
+// waitAborted blocks until a write inside the blocking querier gave up
+// on its context. If this times out, the async flush is unbounded —
+// exactly the wedge this test guards against.
+func (s *blockingUpdateQuerier) waitAborted(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.aborted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("async flush was never aborted by its timeout")
 	}
 }
