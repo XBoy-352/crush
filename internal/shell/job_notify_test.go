@@ -1,6 +1,7 @@
 package shell
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -167,6 +168,33 @@ func TestRunningCountsSplitsBySession(t *testing.T) {
 	own, other := manager.RunningCounts(mine)
 	require.Equal(t, 1, own)
 	require.Equal(t, 1, other)
+}
+
+// Sessions nobody drains must not accumulate forever in a long-lived
+// server process.
+func TestMailboxEvictsOldestSessions(t *testing.T) {
+	b := &completionMailbox{pending: make(map[string][]JobCompletion)}
+	for i := range maxMailboxSessions + 10 {
+		b.add(JobCompletion{ShellID: "1", SessionID: fmt.Sprintf("session-%d", i)})
+	}
+
+	require.Len(t, b.pending, maxMailboxSessions)
+	require.Len(t, b.order, maxMailboxSessions)
+	require.Empty(t, b.take("session-0"))
+	require.Len(t, b.take(fmt.Sprintf("session-%d", maxMailboxSessions+9)), 1)
+}
+
+func TestMailboxCapsNoticesPerSession(t *testing.T) {
+	b := &completionMailbox{pending: make(map[string][]JobCompletion)}
+	for i := range maxPendingCompletionsPerSession + 5 {
+		b.add(JobCompletion{ShellID: fmt.Sprintf("%d", i), SessionID: "s"})
+	}
+
+	queue := b.take("s")
+	require.Len(t, queue, maxPendingCompletionsPerSession)
+	// Oldest dropped first, so the newest notice survives.
+	require.Equal(t, fmt.Sprintf("%d", maxPendingCompletionsPerSession+4), queue[len(queue)-1].ShellID)
+	require.Empty(t, b.order)
 }
 
 func TestFormatJobCompletions(t *testing.T) {

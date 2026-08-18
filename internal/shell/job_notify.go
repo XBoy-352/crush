@@ -3,6 +3,7 @@ package shell
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -87,6 +88,13 @@ const completionOutputLimit = 8000
 // dropped first. Every job stays listed and readable via job_output.
 const maxPendingCompletionsPerSession = 50
 
+// maxMailboxSessions bounds how many sessions the mailbox tracks at once.
+// Nothing drains a session whose agent never watches for completions (a
+// non-interactive run, or notifications switched off), so without a cap a
+// long-lived server process would accumulate a queue per session forever.
+// Eviction is oldest-first by arrival.
+const maxMailboxSessions = 128
+
 var (
 	jobBroker     *pubsub.Broker[JobEvent]
 	jobBrokerOnce sync.Once
@@ -114,7 +122,9 @@ func publishJobEvent(ev JobEvent) {
 // step), between turns (wakes the agent), or during shutdown (dropped) —
 // none of which the shell package should have to know about.
 type completionMailbox struct {
-	mu      sync.Mutex
+	mu sync.Mutex
+	// order lists the tracked sessions oldest first, for eviction.
+	order   []string
 	pending map[string][]JobCompletion
 }
 
@@ -133,18 +143,32 @@ func mailbox() *completionMailbox {
 func (b *completionMailbox) add(c JobCompletion) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	queue := append(b.pending[c.SessionID], c)
+	queue, tracked := b.pending[c.SessionID]
+	if !tracked {
+		b.order = append(b.order, c.SessionID)
+		for len(b.order) > maxMailboxSessions {
+			delete(b.pending, b.order[0])
+			b.order = b.order[1:]
+		}
+	}
+	queue = append(queue, c)
 	if len(queue) > maxPendingCompletionsPerSession {
 		queue = queue[len(queue)-maxPendingCompletionsPerSession:]
 	}
 	b.pending[c.SessionID] = queue
 }
 
+// forget drops a session's queue and its eviction slot.
+func (b *completionMailbox) forget(sessionID string) {
+	delete(b.pending, sessionID)
+	b.order = slices.DeleteFunc(b.order, func(id string) bool { return id == sessionID })
+}
+
 func (b *completionMailbox) take(sessionID string) []JobCompletion {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	queue := b.pending[sessionID]
-	delete(b.pending, sessionID)
+	b.forget(sessionID)
 	return queue
 }
 
@@ -165,7 +189,7 @@ func (b *completionMailbox) clear(sessionID, shellID string) {
 		}
 	}
 	if len(kept) == 0 {
-		delete(b.pending, sessionID)
+		b.forget(sessionID)
 		return
 	}
 	b.pending[sessionID] = kept
