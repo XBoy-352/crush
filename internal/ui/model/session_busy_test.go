@@ -54,11 +54,15 @@ type countingWorkspace struct {
 	modelCalls      int
 	lspStateCalls   int
 	lspDiagCalls    int
+	jobCountCalls   int
 }
 
-func (w *countingWorkspace) RunningBackgroundJobsCount(context.Context) int { return 0 }
-func (w *countingWorkspace) AgentIsReady() bool                             { w.readyCalls++; return w.ready }
-func (w *countingWorkspace) AgentIsBusy() bool                              { w.agentBusyCalls++; return w.agentBusy }
+func (w *countingWorkspace) BackgroundJobCounts(context.Context, string) (int, int) {
+	w.jobCountCalls++
+	return 0, 0
+}
+func (w *countingWorkspace) AgentIsReady() bool { w.readyCalls++; return w.ready }
+func (w *countingWorkspace) AgentIsBusy() bool  { w.agentBusyCalls++; return w.agentBusy }
 
 func (w *countingWorkspace) AgentReadyErr() error {
 	w.readyCalls++
@@ -215,7 +219,7 @@ func runCmds(m *UI, cmd tea.Cmd) {
 		for _, c := range msg {
 			runCmds(m, c)
 		}
-	case busyStateMsg, promptQueueMsg, agentRunSubmittedMsg, lspStatesMsg, agentModelChangedMsg:
+	case busyStateMsg, promptQueueMsg, agentRunSubmittedMsg, lspStatesMsg, agentModelChangedMsg, jobCountsMsg:
 		_, next := m.Update(msg)
 		runCmds(m, next)
 	}

@@ -146,14 +146,6 @@ func renderHeaderDetails(
 		parts = append(parts, t.LSP.ErrorDiagnostic.Render(fmt.Sprintf("%s%d", styles.LSPErrorIcon, lspErrorCount)))
 	}
 
-	if runningJobsCount > 0 {
-		jobWord := "jobs"
-		if runningJobsCount == 1 {
-			jobWord = "job"
-		}
-		parts = append(parts, t.Header.Percentage.Render(fmt.Sprintf("⚙ %d %s", runningJobsCount, jobWord)))
-	}
-
 	agentCfg := com.Config().Agents[config.AgentCoder]
 	model := com.Config().GetModelByType(agentCfg.Model)
 	if model != nil && model.ContextWindow > 0 {
@@ -169,6 +161,16 @@ func renderHeaderDetails(
 	if com.IsHyper() && hyperCredits != nil {
 		hc := t.Header.HypercreditIcon.Render(styles.HypercreditIcon) + " " + t.Header.Percentage.Render(common.FormatCredits(*hyperCredits))
 		parts = append(parts, hc)
+	}
+
+	// After the percentage and credits: details truncate from the right,
+	// so an earlier slot would push existing information off.
+	if runningJobsCount > 0 {
+		jobWord := "jobs"
+		if runningJobsCount == 1 {
+			jobWord = "job"
+		}
+		parts = append(parts, t.Header.Percentage.Render(fmt.Sprintf("%s %d %s", styles.JobIcon, runningJobsCount, jobWord)))
 	}
 
 	const keystroke = "ctrl+d"

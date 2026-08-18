@@ -319,6 +319,7 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 				}
 
 				// Still running after fast-failure check - return as background job
+				bgShell.MarkBackgrounded(GetRootSessionFromContext(ctx))
 				metadata := BashResponseMetadata{
 					StartTime:        startTime.UnixMilli(),
 					EndTime:          time.Now().UnixMilli(),
@@ -327,7 +328,7 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 					Background:       true,
 					ShellID:          bgShell.ID,
 				}
-				response := fmt.Sprintf("Background shell started with ID: %s\n\nUse job_output tool to view output or job_kill to terminate.", bgShell.ID)
+				response := fmt.Sprintf("Background shell started with ID: %s\n\nYou will be notified automatically when it finishes — do not poll it. Use job_output to inspect it early, or job_kill to terminate it.", bgShell.ID)
 				return fantasy.WithResponseMetadata(fantasy.NewTextResponse(response), metadata), nil
 			}
 
@@ -419,6 +420,7 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 			}
 
 			// Still running - keep as background job
+			bgShell.MarkBackgrounded(rootSessionID)
 			metadata := BashResponseMetadata{
 				StartTime:          startTime.UnixMilli(),
 				EndTime:            time.Now().UnixMilli(),
@@ -430,9 +432,9 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 			}
 			var response string
 			if backgroundedByUser {
-				response = fmt.Sprintf("Command was moved to the background by the user.\n\nBackground shell ID: %s\n\nUse job_output tool to view output or job_kill to terminate.", bgShell.ID)
+				response = fmt.Sprintf("Command was moved to the background by the user.\n\nBackground shell ID: %s\n\nYou will be notified automatically when it finishes — do not poll it. Use job_output to inspect it early, or job_kill to terminate it.", bgShell.ID)
 			} else {
-				response = fmt.Sprintf("Command is taking longer than expected and has been moved to background.\n\nBackground shell ID: %s\n\nUse job_output tool to view output or job_kill to terminate.", bgShell.ID)
+				response = fmt.Sprintf("Command is taking longer than expected and has been moved to background.\n\nBackground shell ID: %s\n\nYou will be notified automatically when it finishes — do not poll it. Continue with other work. Use job_output to inspect it early, or job_kill to terminate it.", bgShell.ID)
 			}
 			return fantasy.WithResponseMetadata(fantasy.NewTextResponse(response), metadata), nil
 		},

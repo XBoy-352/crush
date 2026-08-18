@@ -237,6 +237,16 @@ type BackgroundShell struct {
 	done        chan struct{}
 	exitErr     error
 	completedAt atomic.Int64 // Unix timestamp when job completed (0 if still running)
+
+	// notifyMu guards the notice bookkeeping: the exit goroutine and the
+	// tool's hand-off both decide whether a notice is owed, and each needs
+	// the other's decision visible.
+	notifyMu     sync.Mutex
+	sessionID    string
+	backgrounded bool
+	finished     bool
+	suppressed   bool
+	notified     bool
 }
 
 // BackgroundShellManager manages background shell instances.
@@ -298,6 +308,10 @@ func (m *BackgroundShellManager) Start(ctx context.Context, workingDir string, b
 	m.shells.Set(id, bgShell)
 
 	go func() {
+		// LIFO: done closes first, since a woken subscriber reads output
+		// through GetOutput, which reports done off that channel. Deferred
+		// so a panic cannot leave a waiter blocked forever.
+		defer bgShell.onExit()
 		defer close(bgShell.done)
 
 		err := shell.ExecStream(shellCtx, command, bgShell.stdout, bgShell.stderr)
@@ -309,6 +323,103 @@ func (m *BackgroundShellManager) Start(ctx context.Context, workingDir string, b
 	return bgShell, nil
 }
 
+// MarkBackgrounded records that the tool handed this shell back as a job
+// owned by sessionID. Only a marked shell owes a notice: one that finished
+// inside the foreground wait already returned its output.
+//
+// The already-finished branch is not defensive — the shell can exit before
+// this call, by which point the exit goroutine found nobody to notify.
+func (bs *BackgroundShell) MarkBackgrounded(sessionID string) {
+	bs.notifyMu.Lock()
+	bs.backgrounded = true
+	bs.sessionID = sessionID
+	finished := bs.finished
+	bs.notifyMu.Unlock()
+
+	publishJobEvent(JobEvent{Type: JobStarted, ShellID: bs.ID, SessionID: sessionID})
+
+	if finished {
+		bs.emitCompletion()
+	}
+}
+
+// SessionID returns the owning session, or "" if never backgrounded.
+func (bs *BackgroundShell) SessionID() string {
+	bs.notifyMu.Lock()
+	defer bs.notifyMu.Unlock()
+	return bs.sessionID
+}
+
+// DiscardCompletionNotice suppresses the notice and drops any already
+// queued, for when the agent learns the outcome by other means.
+func (bs *BackgroundShell) DiscardCompletionNotice() {
+	// Under notifyMu, so it cannot slip between a concurrent emit's
+	// suppression check and its enqueue.
+	bs.notifyMu.Lock()
+	defer bs.notifyMu.Unlock()
+	bs.suppressed = true
+	DiscardJobCompletion(bs.sessionID, bs.ID)
+}
+
+// onExit runs when the shell process exits.
+func (bs *BackgroundShell) onExit() {
+	bs.notifyMu.Lock()
+	bs.finished = true
+	backgrounded := bs.backgrounded
+	bs.notifyMu.Unlock()
+
+	if backgrounded {
+		bs.emitCompletion()
+	}
+}
+
+// emitCompletion queues the notice and publishes JobCompleted, once.
+func (bs *BackgroundShell) emitCompletion() {
+	bs.notifyMu.Lock()
+	if bs.notified || bs.suppressed {
+		bs.notifyMu.Unlock()
+		return
+	}
+	bs.notified = true
+	sessionID := bs.sessionID
+
+	stdout, stderr, _, exitErr := bs.GetOutput()
+	completion := JobCompletion{
+		ShellID:     bs.ID,
+		SessionID:   sessionID,
+		Command:     bs.Command,
+		Description: bs.Description,
+		StartedAt:   bs.StartedAt,
+		CompletedAt: time.Unix(bs.completedAt.Load(), 0),
+		ExitCode:    ExitCode(exitErr),
+		Interrupted: IsInterrupt(exitErr),
+		Output:      completionOutput(stdout, stderr),
+	}
+	if sessionID != "" {
+		mailbox().add(completion)
+	}
+	bs.notifyMu.Unlock()
+
+	publishJobEvent(JobEvent{Type: JobCompleted, ShellID: completion.ShellID, SessionID: completion.SessionID})
+}
+
+// completionOutput keeps the tail, where a run puts its verdict.
+func completionOutput(stdout, stderr string) string {
+	combined := strings.TrimSpace(stdout)
+	if e := strings.TrimSpace(stderr); e != "" {
+		if combined != "" {
+			combined += "\n"
+		}
+		combined += e
+	}
+	if len(combined) <= completionOutputLimit {
+		return combined
+	}
+	tail := combined[len(combined)-completionOutputLimit:]
+	tail = string(trimPartialRunePrefix([]byte(tail)))
+	return "... [output truncated, use job_output for the full log] ...\n" + tail
+}
+
 // Get retrieves a background shell by ID.
 func (m *BackgroundShellManager) Get(id string) (*BackgroundShell, bool) {
 	return m.shells.Get(id)
@@ -317,10 +428,11 @@ func (m *BackgroundShellManager) Get(id string) (*BackgroundShell, bool) {
 // Remove removes a background shell from the manager without terminating it.
 // This is useful when a shell has already completed and you just want to clean up tracking.
 func (m *BackgroundShellManager) Remove(id string) error {
-	_, ok := m.shells.Take(id)
+	shell, ok := m.shells.Take(id)
 	if !ok {
 		return fmt.Errorf("%w: %s", ErrBackgroundShellNotFound, id)
 	}
+	publishJobEvent(JobEvent{Type: JobRemoved, ShellID: shell.ID, SessionID: shell.SessionID()})
 	return nil
 }
 
@@ -331,8 +443,11 @@ func (m *BackgroundShellManager) Kill(id string) error {
 		return fmt.Errorf("%w: %s", ErrBackgroundShellNotFound, id)
 	}
 
+	// A deliberate kill is not news; the caller already knows.
+	shell.DiscardCompletionNotice()
 	shell.cancel()
 	<-shell.done
+	publishJobEvent(JobEvent{Type: JobRemoved, ShellID: shell.ID, SessionID: shell.SessionID()})
 	return nil
 }
 
@@ -386,6 +501,23 @@ func (m *BackgroundShellManager) RunningCount() int {
 	return count
 }
 
+// RunningCounts splits active jobs into sessionID's and everyone else's.
+// The manager is process-global, so a caller rendering one session needs
+// the split to avoid claiming another session's job.
+func (m *BackgroundShellManager) RunningCounts(sessionID string) (own, other int) {
+	for shell := range m.shells.Seq() {
+		if shell.IsDone() {
+			continue
+		}
+		if shell.SessionID() == sessionID {
+			own++
+		} else {
+			other++
+		}
+	}
+	return own, other
+}
+
 // Cleanup removes completed jobs that have been finished for more than the retention period
 func (m *BackgroundShellManager) Cleanup() int {
 	now := time.Now().Unix()
@@ -415,6 +547,8 @@ func (m *BackgroundShellManager) KillAll(ctx context.Context) {
 	var wg sync.WaitGroup
 	for _, shell := range shells {
 		wg.Go(func() {
+			// Shutdown: nobody is left to read a notice.
+			shell.DiscardCompletionNotice()
 			shell.cancel()
 			select {
 			case <-shell.done:

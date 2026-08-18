@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/question"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/charmbracelet/crush/internal/skills"
 )
 
@@ -97,6 +98,15 @@ func wrapEvent(ev any) *pubsub.Payload {
 			Type: e.Type,
 			Payload: proto.QuestionNotification{
 				BatchID: e.Payload.BatchID,
+			},
+		})
+	case pubsub.Event[shell.JobEvent]:
+		return envelope(pubsub.PayloadTypeBackgroundJobEvent, pubsub.Event[proto.BackgroundJobEvent]{
+			Type: e.Type,
+			Payload: proto.BackgroundJobEvent{
+				Type:      string(e.Payload.Type),
+				ShellID:   e.Payload.ShellID,
+				SessionID: e.Payload.SessionID,
 			},
 		})
 	case pubsub.Event[message.Message]:

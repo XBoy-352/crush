@@ -152,6 +152,10 @@ type CoordinatorOptions struct {
 	RunComplete pubsub.Publisher[notify.RunComplete]
 	Skills      *skills.Manager
 	Interactive bool
+	// Lifetime bounds the coordinator's own background work. It must
+	// outlive the constructor's ctx, which at the HTTP boundary is scoped
+	// to the request that created the agent. Falls back to ctx.
+	Lifetime context.Context
 }
 
 func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, error) {
@@ -203,17 +207,27 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 	}
 	c.currentAgent = agent
 	c.agents[config.AgentCoder] = agent
+
+	// Interactive only: a non-interactive run ends at its own RunComplete
+	// and kills surviving jobs, so a later wake has nobody to hear it.
+	if c.interactive && !opts.Config.Config().Options.DisableBackgroundJobNotifications {
+		lifetime := opts.Lifetime
+		if lifetime == nil {
+			lifetime = ctx
+		}
+		go c.watchBackgroundJobs(lifetime)
+	}
 	return c, nil
 }
 
 // Run implements Coordinator.
 func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
-	return c.run(ctx, nil, sessionID, prompt, attachments...)
+	return c.run(ctx, nil, sessionID, prompt, runOptions{}, attachments...)
 }
 
 // RunAccepted implements Coordinator.
 func (c *coordinator) RunAccepted(ctx context.Context, accept *AcceptedRun, sessionID string, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
-	return c.run(ctx, accept, sessionID, prompt, attachments...)
+	return c.run(ctx, accept, sessionID, prompt, runOptions{}, attachments...)
 }
 
 // run is the shared implementation behind Run and RunAccepted. When
@@ -221,7 +235,15 @@ func (c *coordinator) RunAccepted(ctx context.Context, accept *AcceptedRun, sess
 // Accepted so sessionAgent.Run can consume the accept reservation under
 // dispatchMu; when nil (the in-process/local path) no accept tracking
 // applies.
-func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID string, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
+// runOptions carries per-run behavior not in the Coordinator interface.
+type runOptions struct {
+	// synthetic marks a turn the agent started for itself (a job notice).
+	// It skips the UserPromptSubmit hooks, which exist to inspect and
+	// rewrite what the user typed.
+	synthetic bool
+}
+
+func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID string, prompt string, opts runOptions, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
 	if err := c.readyWg.Wait(); err != nil {
 		return nil, err
 	}
@@ -246,9 +268,12 @@ func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID st
 		}
 	}
 
-	prompt, err := c.applyUserPromptSubmitHooks(ctx, sessionID, prompt)
-	if err != nil {
-		return nil, err
+	if !opts.synthetic {
+		var err error
+		prompt, err = c.applyUserPromptSubmitHooks(ctx, sessionID, prompt)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// refresh models before each run
