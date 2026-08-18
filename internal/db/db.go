@@ -394,21 +394,22 @@ func (q *Queries) queryRow(ctx context.Context, stmt *sql.Stmt, query string, ar
 }
 
 type Queries struct {
+	db                                   DBTX
+	tx                                   *sql.Tx
 	createFileStmt                       *sql.Stmt
 	createMessageStmt                    *sql.Stmt
 	createSessionStmt                    *sql.Stmt
-	db                                   DBTX
 	deleteFileStmt                       *sql.Stmt
 	deleteFileVersionsByIDStmt           *sql.Stmt
 	deleteMessageStmt                    *sql.Stmt
 	deleteMessagesFromCheckpointStmt     *sql.Stmt
+	deleteSessionStmt                    *sql.Stmt
 	deleteSessionFilesStmt               *sql.Stmt
 	deleteSessionMessagesStmt            *sql.Stmt
-	deleteSessionStmt                    *sql.Stmt
 	getAverageResponseTimeStmt           *sql.Stmt
+	getFileStmt                          *sql.Stmt
 	getFileByPathAndSessionStmt          *sql.Stmt
 	getFileReadStmt                      *sql.Stmt
-	getFileStmt                          *sql.Stmt
 	getHourDayHeatmapStmt                *sql.Stmt
 	getLastAssistantMessageBySessionStmt *sql.Stmt
 	getLastSessionStmt                   *sql.Stmt
@@ -417,8 +418,8 @@ type Queries struct {
 	getSessionByIDStmt                   *sql.Stmt
 	getToolUsageStmt                     *sql.Stmt
 	getTotalStatsStmt                    *sql.Stmt
-	getUsageByDayOfWeekStmt              *sql.Stmt
 	getUsageByDayStmt                    *sql.Stmt
+	getUsageByDayOfWeekStmt              *sql.Stmt
 	getUsageByHourStmt                   *sql.Stmt
 	getUsageByModelStmt                  *sql.Stmt
 	listAllUserMessagesStmt              *sql.Stmt
@@ -428,13 +429,11 @@ type Queries struct {
 	listLatestSessionFilesStmt           *sql.Stmt
 	listMessagesBySessionStmt            *sql.Stmt
 	listMessagesFromCheckpointStmt       *sql.Stmt
-	listNewFilesStmt                     *sql.Stmt
 	listSessionReadFilesStmt             *sql.Stmt
 	listSessionsStmt                     *sql.Stmt
 	listUserMessagesBySessionStmt        *sql.Stmt
 	recordFileReadStmt                   *sql.Stmt
 	renameSessionStmt                    *sql.Stmt
-	tx                                   *sql.Tx
 	updateMessageStmt                    *sql.Stmt
 	updateSessionStmt                    *sql.Stmt
 	updateSessionTitleAndUsageStmt       *sql.Stmt
@@ -442,8 +441,8 @@ type Queries struct {
 
 func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 	return &Queries{
-		db:                                   q.db,
-		tx:                                   q.tx,
+		db:                                   tx,
+		tx:                                   tx,
 		createFileStmt:                       q.createFileStmt,
 		createMessageStmt:                    q.createMessageStmt,
 		createSessionStmt:                    q.createSessionStmt,
@@ -451,13 +450,13 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		deleteFileVersionsByIDStmt:           q.deleteFileVersionsByIDStmt,
 		deleteMessageStmt:                    q.deleteMessageStmt,
 		deleteMessagesFromCheckpointStmt:     q.deleteMessagesFromCheckpointStmt,
+		deleteSessionStmt:                    q.deleteSessionStmt,
 		deleteSessionFilesStmt:               q.deleteSessionFilesStmt,
 		deleteSessionMessagesStmt:            q.deleteSessionMessagesStmt,
-		deleteSessionStmt:                    q.deleteSessionStmt,
 		getAverageResponseTimeStmt:           q.getAverageResponseTimeStmt,
+		getFileStmt:                          q.getFileStmt,
 		getFileByPathAndSessionStmt:          q.getFileByPathAndSessionStmt,
 		getFileReadStmt:                      q.getFileReadStmt,
-		getFileStmt:                          q.getFileStmt,
 		getHourDayHeatmapStmt:                q.getHourDayHeatmapStmt,
 		getLastAssistantMessageBySessionStmt: q.getLastAssistantMessageBySessionStmt,
 		getLastSessionStmt:                   q.getLastSessionStmt,
@@ -466,8 +465,8 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getSessionByIDStmt:                   q.getSessionByIDStmt,
 		getToolUsageStmt:                     q.getToolUsageStmt,
 		getTotalStatsStmt:                    q.getTotalStatsStmt,
-		getUsageByDayOfWeekStmt:              q.getUsageByDayOfWeekStmt,
 		getUsageByDayStmt:                    q.getUsageByDayStmt,
+		getUsageByDayOfWeekStmt:              q.getUsageByDayOfWeekStmt,
 		getUsageByHourStmt:                   q.getUsageByHourStmt,
 		getUsageByModelStmt:                  q.getUsageByModelStmt,
 		listAllUserMessagesStmt:              q.listAllUserMessagesStmt,
@@ -477,7 +476,6 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listLatestSessionFilesStmt:           q.listLatestSessionFilesStmt,
 		listMessagesBySessionStmt:            q.listMessagesBySessionStmt,
 		listMessagesFromCheckpointStmt:       q.listMessagesFromCheckpointStmt,
-		listNewFilesStmt:                     q.listNewFilesStmt,
 		listSessionReadFilesStmt:             q.listSessionReadFilesStmt,
 		listSessionsStmt:                     q.listSessionsStmt,
 		listUserMessagesBySessionStmt:        q.listUserMessagesBySessionStmt,
