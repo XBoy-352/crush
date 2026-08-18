@@ -491,6 +491,16 @@
           "description": "Disable automatic conversation summarization",
           "default": false
         },
+        "disable_background_job_notifications": {
+          "type": "boolean",
+          "description": "Do not wake the agent when a background shell job finishes; it must poll job_output instead",
+          "default": false
+        },
+        "disable_memory": {
+          "type": "boolean",
+          "description": "Disable persistent agent memory (the memory_write tool and the memory section of the system prompt)",
+          "default": false
+        },
         "data_directory": {
           "type": "string",
           "description": "Directory for storing application data. Relative paths are resolved against the working directory; absolute paths are used as-is.",
@@ -562,6 +572,23 @@
           "description": "Notification style to use. Options: auto (default), native, osc, bell, disabled. Auto selects based on environment: native for local sessions, osc for SSH (with automatic OSC 99/777 detection).",
           "default": "auto"
         },
+        "disable_notifications": {
+          "type": "boolean",
+          "description": "Deprecated: Use notification_style instead. Disable desktop notifications",
+          "default": false
+        },
+        "notification_style": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "native",
+            "osc",
+            "bell",
+            "disabled"
+          ],
+          "description": "Notification style to use. Options: auto (default)",
+          "default": "auto"
+        },
         "disabled_skills": {
           "items": {
             "type": "string",
@@ -571,6 +598,10 @@
           },
           "type": "array",
           "description": "List of skill names to disable and hide from the agent"
+        },
+        "remote_control": {
+          "$ref": "#/$defs/RemoteControlOptions",
+          "description": "Session-attached remote control relay settings (password via CRUSH_REMOTE_PASS)"
         }
       },
       "additionalProperties": false,
@@ -693,6 +724,23 @@
           },
           "type": "array",
           "description": "List of models available from this provider"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "RemoteControlOptions": {
+      "properties": {
+        "relay_url": {
+          "type": "string",
+          "description": "Relay WebSocket base URL (ws://localhost or wss://host)",
+          "examples": [
+            "wss://relay.example.com"
+          ]
+        },
+        "username": {
+          "type": "string",
+          "description": "Relay login username (password via CRUSH_REMOTE_PASS only)"
         }
       },
       "additionalProperties": false,

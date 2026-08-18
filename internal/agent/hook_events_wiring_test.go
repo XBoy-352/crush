@@ -101,7 +101,7 @@ func TestUserPromptSubmitDenyBlocksRun(t *testing.T) {
 	}
 	require.NoError(t, coord.cfg.Config().ValidateHooks())
 
-	_, err := coord.run(t.Context(), nil, "sess-1", "do a thing")
+	_, err := coord.run(t.Context(), nil, "sess-1", "do a thing", runOptions{})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "prompt blocked by hook")
 	require.Contains(t, err.Error(), "nope")
@@ -116,7 +116,7 @@ func TestUserPromptSubmitUpdatedPromptReachesAgent(t *testing.T) {
 	}
 	require.NoError(t, coord.cfg.Config().ValidateHooks())
 
-	_, err := coord.run(t.Context(), nil, "sess-1", "original prompt")
+	_, err := coord.run(t.Context(), nil, "sess-1", "original prompt", runOptions{})
 	require.NoError(t, err)
 	require.Equal(t, "rewritten by hook", rec.lastPrompt)
 }
