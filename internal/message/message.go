@@ -20,6 +20,12 @@ import (
 // debounce and flush synchronously.
 const defaultUpdateDebounce = 33 * time.Millisecond
 
+// defaultAsyncFlushTimeout bounds detached timer-fired flushes so a
+// wedged write cannot hold the single shared DB connection (and with it
+// the WAL write lock) forever. On expiry the write is aborted and the
+// dirty bit restored, so the next Update or Flush retries.
+const defaultAsyncFlushTimeout = 5 * time.Second
+
 type CreateMessageParams struct {
 	Role             MessageRole
 	Parts            []ContentPart
@@ -115,6 +121,8 @@ type service struct {
 	q        db.Querier
 	debounce time.Duration
 
+	asyncFlushTimeout time.Duration
+
 	mu      sync.Mutex
 	pending map[string]*pendingState
 }
@@ -131,12 +139,22 @@ func WithDebounce(d time.Duration) ServiceOption {
 	}
 }
 
+// WithAsyncFlushTimeout bounds the context of detached timer-fired
+// flushes so a hung write cannot hold the shared DB connection
+// indefinitely. Intended primarily for tests.
+func WithAsyncFlushTimeout(d time.Duration) ServiceOption {
+	return func(s *service) {
+		s.asyncFlushTimeout = d
+	}
+}
+
 func NewService(q db.Querier, opts ...ServiceOption) Service {
 	s := &service{
-		Broker:   pubsub.NewBroker[Message](),
-		q:        q,
-		debounce: defaultUpdateDebounce,
-		pending:  make(map[string]*pendingState),
+		Broker:            pubsub.NewBroker[Message](),
+		q:                 q,
+		debounce:          defaultUpdateDebounce,
+		asyncFlushTimeout: defaultAsyncFlushTimeout,
+		pending:           make(map[string]*pendingState),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -274,8 +292,11 @@ func (s *service) Update(ctx context.Context, msg Message) error {
 		id := msg.ID
 		p.timer = time.AfterFunc(s.debounce, func() {
 			// Detached from caller ctx so a cancelled stream context
-			// does not strand the buffered write.
-			_ = s.flushOne(context.Background(), id, false)
+			// does not strand the buffered write; bounded so a wedged
+			// write cannot hold the shared DB connection forever.
+			flushCtx, cancel := context.WithTimeout(context.Background(), s.asyncFlushTimeout)
+			defer cancel()
+			_ = s.flushOne(flushCtx, id, false)
 		})
 	}
 	s.mu.Unlock()
