@@ -216,6 +216,7 @@ func (b *Backend) ListBackgroundJobs(_ context.Context, workspaceID string) ([]p
 	for _, s := range shells {
 		jobs = append(jobs, proto.BackgroundJob{
 			ID:          s.ID,
+			SessionID:   s.SessionID(),
 			Command:     s.Command,
 			Description: s.Description,
 			StartedAt:   s.StartedAt,

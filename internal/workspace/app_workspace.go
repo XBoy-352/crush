@@ -178,6 +178,7 @@ func (w *AppWorkspace) ListBackgroundJobs(context.Context) ([]proto.BackgroundJo
 	for _, s := range shells {
 		jobs = append(jobs, proto.BackgroundJob{
 			ID:          s.ID,
+			SessionID:   s.SessionID(),
 			Command:     s.Command,
 			Description: s.Description,
 			StartedAt:   s.StartedAt,
@@ -187,8 +188,8 @@ func (w *AppWorkspace) ListBackgroundJobs(context.Context) ([]proto.BackgroundJo
 	return jobs, nil
 }
 
-func (w *AppWorkspace) RunningBackgroundJobsCount(context.Context) int {
-	return shell.GetBackgroundShellManager().RunningCount()
+func (w *AppWorkspace) BackgroundJobCounts(_ context.Context, sessionID string) (own, other int) {
+	return shell.GetBackgroundShellManager().RunningCounts(sessionID)
 }
 
 func (w *AppWorkspace) KillBackgroundJob(_ context.Context, jobID string) error {

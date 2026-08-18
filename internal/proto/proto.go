@@ -171,11 +171,28 @@ type ShellCommandResponse struct {
 // with the total output of every running job. Output stays behind the
 // job_output tool, which fetches exactly one job on demand.
 type BackgroundJob struct {
-	ID          string    `json:"id"`
+	ID string `json:"id"`
+	// SessionID is the session whose agent started the job, empty for a
+	// shell that was never handed back as a background job.
+	SessionID   string    `json:"session_id,omitempty"`
 	Command     string    `json:"command"`
 	Description string    `json:"description,omitempty"`
 	StartedAt   time.Time `json:"started_at"`
 	Done        bool      `json:"done"`
+}
+
+// BackgroundJobEvent is the wire representation of shell.JobEvent. It
+// carries no output, for the reasons documented on BackgroundJob.
+type BackgroundJobEvent struct {
+	Type        string    `json:"type"`
+	ShellID     string    `json:"shell_id"`
+	SessionID   string    `json:"session_id,omitempty"`
+	Command     string    `json:"command,omitempty"`
+	Description string    `json:"description,omitempty"`
+	StartedAt   time.Time `json:"started_at,omitzero"`
+	CompletedAt time.Time `json:"completed_at,omitzero"`
+	ExitCode    int       `json:"exit_code,omitempty"`
+	Interrupted bool      `json:"interrupted,omitempty"`
 }
 
 // AgentSession represents a session with its busy status.

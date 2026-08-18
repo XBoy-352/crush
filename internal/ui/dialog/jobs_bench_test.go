@@ -25,7 +25,7 @@ import (
 // client/server mode), so it fails here first.
 func TestBackgroundJobCarriesNoOutput(t *testing.T) {
 	want := map[string]bool{
-		"ID": true, "Command": true, "Description": true,
+		"ID": true, "SessionID": true, "Command": true, "Description": true,
 		"StartedAt": true, "Done": true,
 	}
 	typ := reflect.TypeFor[proto.BackgroundJob]()

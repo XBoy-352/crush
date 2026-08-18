@@ -25,7 +25,6 @@ package model
 // Update, no model mutation inside commands).
 
 import (
-	"context"
 	"slices"
 	"time"
 
@@ -77,7 +76,6 @@ type busyStateMsg struct {
 	yolo               bool
 	plan               bool
 	hasForegroundWaits bool
-	runningJobs        int
 	// ready/model memoize the coordinator readiness and selected model,
 	// fetched by the same probe so the sidebar/landing model info renders
 	// from memoized state. Zero (and ignored) when ready is false.
@@ -155,7 +153,6 @@ func (m *UI) dispatchBusyRefresh() tea.Cmd {
 	sessionID := m.currentSessionID()
 	return func() tea.Msg {
 		st := busyStateMsg{gen: gen}
-		st.runningJobs = ws.RunningBackgroundJobsCount(context.Background())
 		if ws.AgentIsReady() {
 			st.ready = true
 			st.agentBusy = ws.AgentIsBusy()
@@ -207,7 +204,6 @@ func (m *UI) applyBusyState(msg busyStateMsg) []tea.Cmd {
 	m.yoloCache.set(msg.yolo)
 	m.planCache.set(msg.plan)
 	m.fgWaitCache.set(msg.hasForegroundWaits)
-	m.runningJobsCount = msg.runningJobs
 	m.agentReady = msg.ready
 	m.agentModel = msg.model
 	if prevYolo != msg.yolo || prevPlan != msg.plan {
@@ -219,6 +215,14 @@ func (m *UI) applyBusyState(msg busyStateMsg) []tea.Cmd {
 	}
 
 	var cmds []tea.Cmd
+	if m.jobsCountedFor != m.currentSessionID() {
+		// Session switched (or this is the first probe): the counts are
+		// per-session, so re-scope them. Job events keep them fresh from
+		// here on.
+		if cmd := m.requestJobsRefresh(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
 	busy := m.isAgentBusy()
 	if m.hasSession() && hasInProgressTodo(m.session.Todos) && busy && !m.todoIsSpinning {
 		m.todoIsSpinning = true

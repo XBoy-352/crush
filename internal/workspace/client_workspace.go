@@ -28,6 +28,7 @@ import (
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/question"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/charmbracelet/crush/internal/skills"
 	"github.com/charmbracelet/crush/internal/version"
 	"github.com/charmbracelet/x/powernap/pkg/lsp/protocol"
@@ -251,18 +252,22 @@ func (w *ClientWorkspace) ListBackgroundJobs(ctx context.Context) ([]proto.Backg
 	return w.client.ListBackgroundJobs(ctx, w.workspaceID())
 }
 
-func (w *ClientWorkspace) RunningBackgroundJobsCount(ctx context.Context) int {
+func (w *ClientWorkspace) BackgroundJobCounts(ctx context.Context, sessionID string) (own, other int) {
 	jobs, err := w.ListBackgroundJobs(ctx)
 	if err != nil {
-		return 0
+		return 0, 0
 	}
-	count := 0
 	for _, j := range jobs {
-		if !j.Done {
-			count++
+		if j.Done {
+			continue
+		}
+		if j.SessionID == sessionID {
+			own++
+		} else {
+			other++
 		}
 	}
-	return count
+	return own, other
 }
 
 func (w *ClientWorkspace) KillBackgroundJob(ctx context.Context, jobID string) error {
@@ -1214,6 +1219,21 @@ func (w *ClientWorkspace) translateEvent(ev any) tea.Msg {
 			Type: e.Type,
 			Payload: question.Notification{
 				BatchID: e.Payload.BatchID,
+			},
+		}
+	case pubsub.Event[proto.BackgroundJobEvent]:
+		return pubsub.Event[shell.JobEvent]{
+			Type: e.Type,
+			Payload: shell.JobEvent{
+				Type:        shell.JobEventType(e.Payload.Type),
+				ShellID:     e.Payload.ShellID,
+				SessionID:   e.Payload.SessionID,
+				Command:     e.Payload.Command,
+				Description: e.Payload.Description,
+				StartedAt:   e.Payload.StartedAt,
+				CompletedAt: e.Payload.CompletedAt,
+				ExitCode:    e.Payload.ExitCode,
+				Interrupted: e.Payload.Interrupted,
 			},
 		}
 	case pubsub.Event[proto.Message]:

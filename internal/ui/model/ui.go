@@ -47,6 +47,7 @@ import (
 	"github.com/charmbracelet/crush/internal/question"
 	"github.com/charmbracelet/crush/internal/remotecontrol"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/charmbracelet/crush/internal/skills"
 	"github.com/charmbracelet/crush/internal/stringext"
 	"github.com/charmbracelet/crush/internal/ui/anim"
@@ -408,8 +409,17 @@ type UI struct {
 	// hyperCredits is the remaining Hyper credits, updated after each prompt.
 	// It is nil when unknown, or when the team has hypercredit display
 	// disabled, and no balance is rendered in either case.
-	hyperCredits     *int
-	runningJobsCount int
+	hyperCredits *int
+	// runningJobsCount is the current session's active background jobs;
+	// otherSessionJobsCount is every other session's. Both are memoized
+	// from job events, see requestJobsRefresh.
+	runningJobsCount      int
+	otherSessionJobsCount int
+	jobsFetchInFlight     bool
+	jobsRefreshQueued     bool
+	// jobsCountedFor is the session the memoized counts belong to; a
+	// mismatch with the active session triggers a re-fetch.
+	jobsCountedFor string
 
 	// Prompt history for up/down navigation through previous messages.
 	promptHistory struct {
@@ -1004,6 +1014,14 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case pubsub.Event[workspace.LSPEvent]:
 		if cmd := m.requestLSPRefresh(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	case pubsub.Event[shell.JobEvent]:
+		if cmd := m.requestJobsRefresh(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	case jobCountsMsg:
+		if cmd := m.applyJobCounts(msg); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 	case pubsub.Event[skills.Event]:

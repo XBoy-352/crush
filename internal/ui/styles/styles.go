@@ -18,10 +18,14 @@ import (
 )
 
 const (
-	CheckIcon       string = "✓"
-	SpinnerIcon     string = "⋯"
-	LoadingIcon     string = "⟳"
-	ModelIcon       string = "◇"
+	CheckIcon   string = "✓"
+	SpinnerIcon string = "⋯"
+	LoadingIcon string = "⟳"
+	ModelIcon   string = "◇"
+	// JobIcon marks background shell jobs. Deliberately not U+2699 GEAR,
+	// which many terminals render emoji-presentation at two cells while
+	// ansi.StringWidth measures it as one.
+	JobIcon         string = "◷"
 	HypercreditIcon string = "◆"
 
 	ArrowRightIcon string = "→"
