@@ -90,14 +90,19 @@ type RuntimeOverrides struct {
 // as immutable: a mutator clones, mutates the clone, and swaps it in under
 // writeMu rather than mutating the live Config in place.
 type ConfigStore struct {
-	config             *Config
-	workingDir         string
-	resolver           VariableResolver
-	globalDataPath     string   // ~/.local/share/crush/crush.json
-	workspacePath      string   // .crush/crush.json
-	loadedPaths        []string // config files that were successfully loaded
-	knownProviders     []catwalk.Provider
-	overrides          RuntimeOverrides
+	config         *Config
+	workingDir     string
+	resolver       VariableResolver
+	globalDataPath string   // ~/.local/share/crush/crush.json
+	workspacePath  string   // .crush/crush.json
+	loadedPaths    []string // config files that were successfully loaded
+	knownProviders []catwalk.Provider
+	overrides      RuntimeOverrides
+	// baseModels remembers what each model type was set to before this
+	// instance first overrode it, so ClearModelOverrides can put the
+	// user's configured choice back rather than leaving the override in
+	// place. Guarded by writeMu, like overrides.
+	baseModels         map[SelectedModelType]SelectedModel
 	trackedConfigPaths []string                // unique, normalized config file paths
 	snapshots          map[string]fileSnapshot // path -> snapshot at last capture
 
@@ -465,8 +470,35 @@ func (s *ConfigStore) OverridePreferredModel(modelType SelectedModelType, model 
 		if c.Models == nil {
 			c.Models = make(map[SelectedModelType]SelectedModel)
 		}
+		if s.baseModels == nil {
+			s.baseModels = make(map[SelectedModelType]SelectedModel)
+		}
+		// Only the first override records a base: a later one would
+		// record the previous override as if the user had chosen it.
+		if _, recorded := s.baseModels[modelType]; !recorded {
+			s.baseModels[modelType] = c.Models[modelType]
+		}
 		c.Models[modelType] = model
 		s.pinPreferredModelLocked(modelType, model)
+	})
+}
+
+// ClearModelOverrides drops every in-memory preferred model override and
+// restores what each model type was set to beforehand. Clearing only the
+// pin would leave the override live in the config and merely allow a
+// later reload to replace it, which is not what a new session wants.
+func (s *ConfigStore) ClearModelOverrides() {
+	s.mutateInMemory(func(c *Config) {
+		for modelType, base := range s.baseModels {
+			if base.Model == "" {
+				// Nothing was selected before the override.
+				delete(c.Models, modelType)
+				continue
+			}
+			c.Models[modelType] = base
+		}
+		clear(s.baseModels)
+		s.overrides.Models = make(map[SelectedModelType]SelectedModel)
 	})
 }
 

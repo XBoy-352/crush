@@ -89,6 +89,17 @@ func (b *Backend) OverridePreferredModel(workspaceID string, modelType config.Se
 	return b.setPreferredModel(workspaceID, config.ScopeGlobal, modelType, model, false)
 }
 
+// ClearModelOverrides clears in-memory model overrides for the workspace.
+func (b *Backend) ClearModelOverrides(workspaceID string) error {
+	ws, err := b.GetWorkspace(workspaceID)
+	if err != nil {
+		return err
+	}
+	ws.Cfg.ClearModelOverrides()
+	publishConfigChanged(ws)
+	return nil
+}
+
 func (b *Backend) setPreferredModel(workspaceID string, scope config.Scope, modelType config.SelectedModelType, model config.SelectedModel, persist bool) error {
 	ws, err := b.GetWorkspace(workspaceID)
 	if err != nil {

@@ -619,6 +619,14 @@ func (w *ClientWorkspace) OverridePreferredModel(modelType config.SelectedModelT
 	return err
 }
 
+func (w *ClientWorkspace) ClearModelOverrides() error {
+	err := w.client.ClearModelOverrides(context.Background(), w.workspaceID())
+	if err == nil {
+		w.refreshWorkspace()
+	}
+	return err
+}
+
 func (w *ClientWorkspace) SetCompactMode(scope config.Scope, enabled bool) error {
 	err := w.client.SetCompactMode(context.Background(), w.workspaceID(), scope, enabled)
 	if err == nil {

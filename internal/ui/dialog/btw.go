@@ -3,6 +3,7 @@ package dialog
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"charm.land/bubbles/v2/help"
@@ -357,18 +358,29 @@ func (d *Btw) renderAnswer(width int) string {
 	return view
 }
 
+var (
+	btwThinkTagRegex       = regexp.MustCompile(`(?s)<think>.*?</think>`)
+	btwOrphanThinkTagRegex = regexp.MustCompile(`(?s)<think>.*`)
+)
+
 func (d *Btw) renderContent(contentWidth int) string {
 	s := d.com.Styles
 	if d.errText != "" {
 		return s.Dialog.SecondaryText.Width(contentWidth).Render(d.errText)
 	}
+	cleanAnswer := d.answer
+	if strings.Contains(cleanAnswer, "<think>") || strings.Contains(cleanAnswer, "</think>") {
+		cleanAnswer = btwThinkTagRegex.ReplaceAllString(cleanAnswer, "")
+		cleanAnswer = btwOrphanThinkTagRegex.ReplaceAllString(cleanAnswer, "")
+		cleanAnswer = strings.TrimSpace(cleanAnswer)
+	}
 	r := common.MarkdownRenderer(s, contentWidth)
 	mu := common.LockMarkdownRenderer(r)
 	mu.Lock()
-	rendered, err := r.Render(d.answer)
+	rendered, err := r.Render(cleanAnswer)
 	mu.Unlock()
 	if err != nil {
-		return d.answer
+		return cleanAnswer
 	}
 	return strings.TrimSpace(rendered)
 }

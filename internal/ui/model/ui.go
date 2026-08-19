@@ -4498,6 +4498,7 @@ func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.
 
 	// Start the turn timer.
 	common.StartTurn()
+	m.chat.ScrollToBottom()
 
 	var cmds []tea.Cmd
 	if !m.hasSession() {
@@ -5454,6 +5455,13 @@ func (m *UI) handleAWSSSOAuthResult(errMsg string) tea.Cmd {
 func (m *UI) newSession() tea.Cmd {
 	if !m.hasSession() {
 		return nil
+	}
+
+	// Best effort: over client/server this is an HTTP call, and failing
+	// to drop the previous session's model pin is not worth blocking a
+	// new session over — but it must not vanish silently either.
+	if err := m.com.Workspace.ClearModelOverrides(); err != nil {
+		slog.Error("Failed to clear session model overrides", "error", err)
 	}
 
 	m.session = nil

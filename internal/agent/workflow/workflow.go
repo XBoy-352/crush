@@ -229,10 +229,16 @@ func Run(ctx context.Context, script string, spawn SpawnFunc, opts Options) (Res
 	wrapped := "return function() -- line 1\n" + script + "\nend"
 	fn, err := L.LoadString(wrapped)
 	if err != nil {
+		if runCtx.Err() != nil {
+			return st.snapshot(), runCtx.Err()
+		}
 		return st.snapshot(), fmt.Errorf("script error: %w", stripLineOffset(err))
 	}
 	L.Push(fn)
 	if err := L.PCall(0, 1, nil); err != nil {
+		if runCtx.Err() != nil {
+			return st.snapshot(), runCtx.Err()
+		}
 		return st.snapshot(), fmt.Errorf("script error: %w", stripLineOffset(err))
 	}
 

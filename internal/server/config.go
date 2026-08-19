@@ -99,6 +99,16 @@ func (c *controllerV1) handlePostWorkspaceConfigModel(w http.ResponseWriter, r *
 	w.WriteHeader(http.StatusOK)
 }
 
+// handlePostWorkspaceConfigClearModelOverrides clears in-memory model overrides.
+func (c *controllerV1) handlePostWorkspaceConfigClearModelOverrides(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := c.backend.ClearModelOverrides(id); err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
 // handlePostWorkspaceConfigCompact sets compact mode.
 //
 //	@Summary		Set compact mode

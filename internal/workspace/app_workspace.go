@@ -437,6 +437,11 @@ func (w *AppWorkspace) OverridePreferredModel(modelType config.SelectedModelType
 	return nil
 }
 
+func (w *AppWorkspace) ClearModelOverrides() error {
+	w.store.ClearModelOverrides()
+	return nil
+}
+
 func (w *AppWorkspace) SetCompactMode(scope config.Scope, enabled bool) error {
 	return w.store.SetCompactMode(scope, enabled)
 }
