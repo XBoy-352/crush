@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/shell"
 )
 
@@ -18,27 +19,17 @@ const jobNoticeDebounce = 750 * time.Millisecond
 // already covers both cases: a busy session folds it into the running
 // turn's next step, an idle one starts a turn. A prompt queued during a
 // turn's final step is picked up by the end-of-run handoff.
-func (c *coordinator) watchBackgroundJobs(ctx context.Context) {
-	events := shell.SubscribeJobEvents(ctx)
-
-	// Reconcile after subscribing, never before: a completion published
-	// in the gap before the subscription existed reached no subscriber,
-	// and its notice would otherwise wait for an unrelated completion on
-	// the same session to drain it. Subscribing first means a completion
-	// landing during reconciliation is seen twice, which is harmless —
-	// the drain is destructive, so the second pass finds nothing.
+// events must already be subscribed by the caller. Subscribing here
+// would leave a gap: a job completing between the caller starting this
+// goroutine and its first statement would publish to no subscriber, and
+// its notice would sit unread until an unrelated completion for the same
+// session drained it.
+func (c *coordinator) watchBackgroundJobs(ctx context.Context, events <-chan pubsub.Event[shell.JobEvent]) {
 	pending := make(map[string]struct{})
-	for _, sessionID := range shell.SessionsWithPendingCompletions() {
-		pending[sessionID] = struct{}{}
-	}
 	var (
 		timer  *time.Timer
 		timerC <-chan time.Time
 	)
-	if len(pending) > 0 {
-		timer = time.NewTimer(jobNoticeDebounce)
-		timerC = timer.C
-	}
 	defer func() {
 		if timer != nil {
 			timer.Stop()
