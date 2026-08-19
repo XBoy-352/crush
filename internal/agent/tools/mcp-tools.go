@@ -3,7 +3,9 @@ package tools
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
+	"strings"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
@@ -73,7 +75,9 @@ func (m *Tool) Info() fantasy.ToolInfo {
 
 	if input, ok := m.tool.InputSchema.(map[string]any); ok {
 		if props, ok := input["properties"].(map[string]any); ok {
-			parameters = props
+			if resolved, ok := inlineSchemaRefs(props, schemaDefs(input), nil).(map[string]any); ok {
+				parameters = resolved
+			}
 		}
 		if req, ok := input["required"].([]any); ok {
 			// Convert []any -> []string when elements are strings
@@ -94,6 +98,78 @@ func (m *Tool) Info() fantasy.ToolInfo {
 		Parameters:  parameters,
 		Required:    required,
 	}
+}
+
+// schemaDefs returns the reusable subschema block of a JSON Schema, supporting
+// both the 2020-12 name ($defs) and the draft-07 one (definitions).
+func schemaDefs(input map[string]any) map[string]any {
+	if defs, ok := input["$defs"].(map[string]any); ok {
+		return defs
+	}
+	defs, _ := input["definitions"].(map[string]any)
+	return defs
+}
+
+// inlineSchemaRefs replaces every $ref with a copy of the subschema it points
+// at, so the result stands alone.
+//
+// Info only forwards a tool's "properties" to the provider and drops the rest
+// of the schema, including the $defs block that $refs resolve against. A $ref
+// that survived that trim would point at something no longer in the payload;
+// strict validators (xAI) reject the whole request with a 400, which takes down
+// every other tool in the same call. A $ref that cannot be resolved is dropped
+// rather than forwarded, so a dangling pointer never reaches the provider.
+//
+// seen carries the $defs names already being expanded on this path, so a
+// self-referential schema stops instead of recursing forever.
+func inlineSchemaRefs(node any, defs map[string]any, seen []string) any {
+	switch n := node.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(n))
+		for k, v := range n {
+			if k != "$ref" {
+				out[k] = inlineSchemaRefs(v, defs, seen)
+			}
+		}
+
+		ref, ok := n["$ref"].(string)
+		if !ok {
+			return out
+		}
+		name, ok := defRefName(ref)
+		if !ok {
+			return out
+		}
+		target, ok := defs[name]
+		if !ok || slices.Contains(seen, name) {
+			return out
+		}
+		resolved, ok := inlineSchemaRefs(target, defs, slices.Concat(seen, []string{name})).(map[string]any)
+		if !ok {
+			return out
+		}
+		// Keys alongside a $ref override the target's, per JSON Schema 2020-12.
+		maps.Copy(resolved, out)
+		return resolved
+	case []any:
+		out := make([]any, len(n))
+		for i, v := range n {
+			out[i] = inlineSchemaRefs(v, defs, seen)
+		}
+		return out
+	default:
+		return node
+	}
+}
+
+// defRefName returns the $defs key a local reference points at.
+func defRefName(ref string) (string, bool) {
+	for _, prefix := range []string{"#/$defs/", "#/definitions/"} {
+		if name, ok := strings.CutPrefix(ref, prefix); ok && name != "" {
+			return name, true
+		}
+	}
+	return "", false
 }
 
 func (m *Tool) Run(ctx context.Context, params fantasy.ToolCall) (fantasy.ToolResponse, error) {
