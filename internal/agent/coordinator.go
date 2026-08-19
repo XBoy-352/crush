@@ -39,6 +39,7 @@ import (
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/question"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/charmbracelet/crush/internal/skills"
 	"golang.org/x/sync/errgroup"
 
@@ -215,7 +216,10 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		if lifetime == nil {
 			lifetime = ctx
 		}
-		go c.watchBackgroundJobs(lifetime)
+		// Subscribe before the goroutine starts so a job completing in
+		// between cannot publish to an empty subscriber list.
+		jobEvents := shell.SubscribeJobEvents(lifetime)
+		go c.watchBackgroundJobs(lifetime, jobEvents)
 	}
 	return c, nil
 }

@@ -38,7 +38,7 @@ func TestBackgroundJobCompletionWakesIdleAgent(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { shell.TakeJobCompletions(sess.ID) })
 
-	go coord.watchBackgroundJobs(t.Context())
+	go coord.watchBackgroundJobs(t.Context(), shell.SubscribeJobEvents(t.Context()))
 
 	manager := shell.GetBackgroundShellManager()
 	bgShell, err := manager.Start(t.Context(), t.TempDir(), nil, "echo built && exit 2", "build")
@@ -63,7 +63,7 @@ func TestBackgroundJobCompletionsAreBatched(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { shell.TakeJobCompletions(sess.ID) })
 
-	go coord.watchBackgroundJobs(t.Context())
+	go coord.watchBackgroundJobs(t.Context(), shell.SubscribeJobEvents(t.Context()))
 
 	manager := shell.GetBackgroundShellManager()
 	var ids []string

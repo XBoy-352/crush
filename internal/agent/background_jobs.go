@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/shell"
 )
 
@@ -18,8 +19,12 @@ const jobNoticeDebounce = 750 * time.Millisecond
 // already covers both cases: a busy session folds it into the running
 // turn's next step, an idle one starts a turn. A prompt queued during a
 // turn's final step is picked up by the end-of-run handoff.
-func (c *coordinator) watchBackgroundJobs(ctx context.Context) {
-	events := shell.SubscribeJobEvents(ctx)
+// events must already be subscribed by the caller. Subscribing here
+// would leave a gap: a job completing between the caller starting this
+// goroutine and its first statement would publish to no subscriber, and
+// its notice would sit unread until an unrelated completion for the same
+// session drained it.
+func (c *coordinator) watchBackgroundJobs(ctx context.Context, events <-chan pubsub.Event[shell.JobEvent]) {
 	pending := make(map[string]struct{})
 	var (
 		timer  *time.Timer
