@@ -8,6 +8,7 @@ import (
 	"iter"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"charm.land/fantasy"
@@ -15,11 +16,25 @@ import (
 )
 
 // streamIdleTimeout is how long a provider stream may sit with no
-// parts before Crush aborts the attempt. Without this, a half-open
-// TCP connection (common after rate limits or proxy stalls) leaves
-// the UI spinning indefinitely with no retry and no error.
-// Mutable for tests only.
-var streamIdleTimeout = 2 * time.Minute
+// activity before it is treated as hung. Held atomically: tests override
+// it, and a parallel test's stream goroutine may be reading it at that
+// same moment, which the race detector rightly flags.
+var streamIdleTimeoutNanos atomic.Int64
+
+func init() {
+	streamIdleTimeoutNanos.Store(int64(2 * time.Minute))
+}
+
+// streamIdleTimeout returns the current idle timeout.
+func streamIdleTimeout() time.Duration {
+	return time.Duration(streamIdleTimeoutNanos.Load())
+}
+
+// setStreamIdleTimeout swaps in a new idle timeout and returns the old
+// one, so a caller can restore it.
+func setStreamIdleTimeout(d time.Duration) time.Duration {
+	return time.Duration(streamIdleTimeoutNanos.Swap(int64(d)))
+}
 
 // retryableLanguageModel wraps a fantasy.LanguageModel so stream
 // failures that fantasy leaves as raw SDK errors (notably mid-stream
@@ -103,7 +118,7 @@ func (m *retryableLanguageModel) Stream(ctx context.Context, call fantasy.Call) 
 			}
 		}()
 
-		timer := time.NewTimer(streamIdleTimeout)
+		timer := time.NewTimer(streamIdleTimeout())
 		defer timer.Stop()
 
 		for {
@@ -129,7 +144,7 @@ func (m *retryableLanguageModel) Stream(ctx context.Context, call fantasy.Call) 
 				}
 				// Go 1.23+ timer semantics: Reset after a receive from a
 				// different case cannot deliver a stale tick.
-				timer.Reset(streamIdleTimeout)
+				timer.Reset(streamIdleTimeout())
 			}
 		}
 	}, nil
@@ -138,7 +153,7 @@ func (m *retryableLanguageModel) Stream(ctx context.Context, call fantasy.Call) 
 func idleStreamTimeoutError() error {
 	return &fantasy.ProviderError{
 		Title:   "stream idle timeout",
-		Message: "provider stream produced no data for " + streamIdleTimeout.String(),
+		Message: "provider stream produced no data for " + streamIdleTimeout().String(),
 		// io.ErrUnexpectedEOF makes ProviderError.IsRetryable() true so
 		// the existing retry middleware re-runs the step.
 		Cause: io.ErrUnexpectedEOF,

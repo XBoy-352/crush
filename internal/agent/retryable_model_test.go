@@ -133,9 +133,8 @@ func (stallModel) Stream(ctx context.Context, _ fantasy.Call) (fantasy.StreamRes
 
 func TestRetryableModel_StreamIdleTimeout(t *testing.T) {
 	// Shorten the idle timeout for the test.
-	old := streamIdleTimeout
-	streamIdleTimeout = 50 * time.Millisecond
-	t.Cleanup(func() { streamIdleTimeout = old })
+	old := setStreamIdleTimeout(50 * time.Millisecond)
+	t.Cleanup(func() { setStreamIdleTimeout(old) })
 
 	m := wrapRetryableModel(stallModel{})
 	stream, err := m.Stream(t.Context(), fantasy.Call{})
@@ -221,9 +220,8 @@ func TestRetryableModel_StreamAllocationsAreConstant(t *testing.T) {
 // is cancelled (Escape mid-turn) rather than waiting out the idle
 // timeout.
 func TestRetryableModel_StreamCancelReturnsPromptly(t *testing.T) {
-	old := streamIdleTimeout
-	streamIdleTimeout = time.Hour
-	t.Cleanup(func() { streamIdleTimeout = old })
+	old := setStreamIdleTimeout(time.Hour)
+	t.Cleanup(func() { setStreamIdleTimeout(old) })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	stream, err := wrapRetryableModel(stallModel{}).Stream(ctx, fantasy.Call{})
