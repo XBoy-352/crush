@@ -95,7 +95,10 @@ func TestUpdate_DebouncesTextDeltas(t *testing.T) {
 	t.Parallel()
 
 	// Long-enough debounce that we can verify nothing flushes prematurely.
-	svc, sessionID := newTestService(t, WithDebounce(50*time.Millisecond))
+	// The window has to comfortably outlast the five Update calls plus the
+	// check below on a loaded CI runner, or the flush this asserts against
+	// fires while we are still setting up.
+	svc, sessionID := newTestService(t, WithDebounce(500*time.Millisecond))
 
 	subCtx, cancelSub := context.WithCancel(t.Context())
 	defer cancelSub()
@@ -106,8 +109,14 @@ func TestUpdate_DebouncesTextDeltas(t *testing.T) {
 		Role: Assistant,
 	})
 	require.NoError(t, err)
-	// Drop the CreatedEvent emitted by Create.
-	time.Sleep(5 * time.Millisecond)
+	// Drop the CreatedEvent emitted by Create. Wait for it to actually
+	// land rather than sleeping a fixed 5ms: the broker delivers on its
+	// own goroutine, so under load the event arrives after the reset and
+	// then shows up in the assertion below as if a delta had flushed
+	// early.
+	require.Eventually(t, func() bool {
+		return len(collector.snapshot()) >= 1
+	}, 10*time.Second, time.Millisecond, "Create's event never arrived")
 	collector.reset()
 
 	// Push 5 deltas inside a single debounce window.
@@ -117,13 +126,13 @@ func TestUpdate_DebouncesTextDeltas(t *testing.T) {
 	}
 
 	// Before the debounce expires no UpdatedEvent should have landed.
-	time.Sleep(10 * time.Millisecond)
+	time.Sleep(20 * time.Millisecond)
 	require.Empty(t, collector.snapshot(), "no events should land before debounce window expires")
 
 	// Wait for the debounce timer to fire.
 	require.Eventually(t, func() bool {
 		return len(collector.snapshot()) >= 1
-	}, time.Second, 5*time.Millisecond)
+	}, 10*time.Second, 5*time.Millisecond)
 	events := collector.snapshot()
 	require.Len(t, events, 1, "5 deltas should coalesce into 1 UpdatedEvent")
 	require.Equal(t, pubsub.UpdatedEvent, events[0].Type)
