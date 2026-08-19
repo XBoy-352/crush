@@ -5437,7 +5437,12 @@ func (m *UI) newSession() tea.Cmd {
 		return nil
 	}
 
-	_ = m.com.Workspace.ClearModelOverrides()
+	// Best effort: over client/server this is an HTTP call, and failing
+	// to drop the previous session's model pin is not worth blocking a
+	// new session over — but it must not vanish silently either.
+	if err := m.com.Workspace.ClearModelOverrides(); err != nil {
+		slog.Error("Failed to clear session model overrides", "error", err)
+	}
 
 	m.session = nil
 	m.sidebarOffset = 0
