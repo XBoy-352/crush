@@ -97,3 +97,32 @@ func TestBackgroundJobCompletionIsLeftForItsOwner(t *testing.T) {
 	coord.deliverJobCompletions(t.Context(), other)
 	require.Equal(t, 1, shell.PendingJobCompletions(other))
 }
+
+// A completion published before the watcher subscribed is not on the wire
+// any more, so the only way it reaches the agent is startup reconciliation.
+func TestBackgroundJobCompletionDeliveredWhenPublishedBeforeWatcher(t *testing.T) {
+	coord := newGateTestCoordinator(t, true)
+
+	sess, err := coord.sessions.Create(t.Context(), "late watcher")
+	require.NoError(t, err)
+	t.Cleanup(func() { shell.TakeJobCompletions(sess.ID) })
+
+	manager := shell.GetBackgroundShellManager()
+	bgShell, err := manager.Start(t.Context(), t.TempDir(), nil, "echo late && exit 5", "late")
+	require.NoError(t, err)
+	t.Cleanup(func() { manager.Remove(bgShell.ID) })
+	bgShell.MarkBackgrounded(sess.ID)
+
+	// Wait for the notice to be queued, which is also after its event has
+	// been published, so the watcher started below cannot have received it.
+	require.Eventually(t, func() bool {
+		return shell.PendingJobCompletions(sess.ID) == 1
+	}, 10*time.Second, 10*time.Millisecond)
+
+	go coord.watchBackgroundJobs(t.Context())
+
+	notice := waitForJobNotice(t, coord, sess.ID)
+	require.Contains(t, notice.Content().Text, bgShell.ID)
+	require.Contains(t, notice.Content().Text, "exit_code=5")
+	require.Zero(t, shell.PendingJobCompletions(sess.ID))
+}

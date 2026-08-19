@@ -153,6 +153,13 @@ func (b *completionMailbox) take(sessionID string) []JobCompletion {
 	return queue
 }
 
+// sessions returns the tracked sessions, oldest first.
+func (b *completionMailbox) sessions() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return slices.Clone(b.order)
+}
+
 func (b *completionMailbox) count(sessionID string) int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -192,6 +199,15 @@ func RestoreJobCompletions(completions []JobCompletion) {
 			mailbox().add(c)
 		}
 	}
+}
+
+// SessionsWithPendingCompletions lists the sessions currently holding
+// undelivered notices. A watcher uses it to reconcile at startup: an
+// event published before it subscribed is gone, and without this the
+// notice would sit unread until some later completion for the same
+// session happened to drain it.
+func SessionsWithPendingCompletions() []string {
+	return mailbox().sessions()
 }
 
 // PendingJobCompletions counts waiting notices without consuming them.
