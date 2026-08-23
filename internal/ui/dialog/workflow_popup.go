@@ -46,6 +46,7 @@ type WorkflowPopup struct {
 	completed int
 	total     int
 	lastSeq   int64
+	phase     string
 
 	agents     []*WorkflowAgentInfo
 	agentMap   map[int]*WorkflowAgentInfo
@@ -163,6 +164,10 @@ func (w *WorkflowPopup) HandleProgress(wp *notify.WorkflowProgress) {
 	w.running = wp.Running
 	w.completed = wp.Completed
 	w.total = wp.Total
+
+	if wp.Phase != "" {
+		w.phase = wp.Phase
+	}
 
 	if wp.Total > len(w.agents) {
 		w.ensureTotalAgents(wp.Total)
@@ -356,6 +361,11 @@ func (w *WorkflowPopup) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 
 	// Sub-agents section
 	rc.AddPart(t.Dialog.PrimaryText.Bold(true).Render("Sub-Agents:"))
+
+	if w.phase != "" {
+		header := t.Dialog.PrimaryText.Bold(true).Render("  ▸ " + ansi.Truncate(w.phase, max(10, innerWidth-8), "…"))
+		rc.AddPart(header)
+	}
 
 	maxAgentListLines := 5
 

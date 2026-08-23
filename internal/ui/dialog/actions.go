@@ -119,6 +119,17 @@ type (
 		MessageID      string
 		MessageContent string
 	}
+	// ActionForkAtMessage is returned by the branch picker when the user
+	// picks a fork point. The UI should fork the session at that message
+	// (keeping the original intact) and switch to the new fork.
+	ActionForkAtMessage struct {
+		MessageID string
+	}
+	// ActionShowForks is returned by the sessions dialog when the user asks
+	// for the branches of a session. The UI should list its forks.
+	ActionShowForks struct {
+		OriginSessionID string
+	}
 	// ActionKillJob is a message to kill a background job.
 	ActionKillJob struct {
 		ShellID string

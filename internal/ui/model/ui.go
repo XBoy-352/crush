@@ -195,6 +195,22 @@ type (
 		sessionID string
 		messages  []message.Message
 	}
+	// forkCreatedMsg carries the newly created fork session back from the
+	// off-thread ForkSession call.
+	forkCreatedMsg struct {
+		fork session.Session
+	}
+	// branchPickerLoadedMsg carries the session messages loaded off the
+	// Update loop for the fork-point picker.
+	branchPickerLoadedMsg struct {
+		sessionID string
+		messages  []message.Message
+	}
+	// forksLoadedMsg carries a session's fork list loaded off the Update loop.
+	forksLoadedMsg struct {
+		originID string
+		forks    []session.Session
+	}
 )
 
 // UI represents the main user interface model.
@@ -1482,6 +1498,43 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break
 		}
 		m.dialog.OpenDialog(dialog.NewRevertPicker(m.com, userMessages))
+	case subagentsLoadedMsg:
+		// Children were loaded off the Update loop; build and open the panel
+		// here (no IO). Ignore if the user switched sessions while loading.
+		if !m.hasSession() || msg.sessionID != m.session.ID {
+			break
+		}
+		panel := dialog.NewSubagents(m.com, msg.sessionID, m.com.Workspace.ListChildren)
+		for _, child := range msg.children {
+			panel.HandleLifecycle(&notify.SubAgentLifecycle{
+				ParentSessionID: msg.sessionID,
+				SubSessionID:    child.ID,
+				Title:           child.Title,
+				Phase:           "done",
+			})
+			if row := panel.Rows()[len(panel.Rows())-1]; row != nil {
+				row.Cost = child.Cost
+				row.StartedAt = time.Unix(child.CreatedAt, 0)
+			}
+		}
+		m.dialog.OpenDialog(panel)
+	case branchPickerLoadedMsg:
+		// Messages were loaded off the Update loop; build and open the
+		// picker here (no IO). Ignore if the user switched sessions.
+		if !m.hasSession() || msg.sessionID != m.session.ID {
+			break
+		}
+		var userMessages []message.Message
+		for i := len(msg.messages) - 1; i >= 0; i-- {
+			if msg.messages[i].Role == message.User {
+				userMessages = append(userMessages, msg.messages[i])
+			}
+		}
+		if len(userMessages) == 0 {
+			cmds = append(cmds, util.ReportWarn("No user messages to fork from"))
+			break
+		}
+		m.dialog.OpenDialog(dialog.NewBranchPicker(m.com, userMessages))
 	case util.InfoMsg:
 		if msg.Type == util.InfoTypeError {
 			slog.Error("Error reported", "error", msg.Msg)
@@ -2350,6 +2403,52 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		// revert scope dialog next.
 		m.dialog.CloseDialog(dialog.RevertPickerID)
 		m.dialog.OpenDialog(dialog.NewRevert(m.com, msg.MessageID, msg.MessageContent))
+
+	case dialog.ActionForkAtMessage:
+		// User picked a fork point — fork off-thread (flush + SQL copy is
+		// an HTTP round-trip in client/server mode) and switch to the fork.
+		m.dialog.CloseDialog(dialog.BranchPickerID)
+		originID := ""
+		if m.hasSession() {
+			originID = m.session.ID
+		}
+		if originID == "" {
+			break
+		}
+		checkpointID := msg.MessageID
+		cmds = append(cmds, func() tea.Msg {
+			fork, err := m.com.Workspace.ForkSession(context.Background(), originID, checkpointID, "")
+			if err != nil {
+				return util.NewErrorMsg(err)
+			}
+			return forkCreatedMsg{fork: fork}
+		})
+
+	case forkCreatedMsg:
+		cmds = append(cmds, m.loadSession(msg.fork.ID))
+		cmds = append(cmds, util.CmdHandler(util.NewInfoMsg("Forked session: "+msg.fork.Title)))
+
+	case dialog.ActionShowForks:
+		cmds = append(cmds, m.listForksFor(msg.OriginSessionID))
+
+	case forksLoadedMsg:
+		if len(msg.forks) == 0 {
+			cmds = append(cmds, util.ReportWarn("No branches for this session"))
+			break
+		}
+		panel := dialog.NewSubagents(m.com, msg.originID, nil)
+		for _, fork := range msg.forks {
+			panel.HandleLifecycle(&notify.SubAgentLifecycle{
+				ParentSessionID: msg.originID,
+				SubSessionID:    fork.ID,
+				Title:           fork.Title + " (branch)",
+				Phase:           "done",
+			})
+			if row := panel.Rows()[len(panel.Rows())-1]; row != nil {
+				row.Cost = fork.Cost
+			}
+		}
+		m.dialog.OpenDialog(panel)
 
 	// ActionKillJob kills a background shell job. The registry lives in
 	// the agent process, so this is an HTTP round-trip in client/server
@@ -4788,6 +4887,14 @@ func (m *UI) openDialog(id string) tea.Cmd {
 		if cmd := m.openWorkflowPopupDialog(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+	case dialog.SubagentsID:
+		if cmd := m.openSubagentsDialog(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	case dialog.BranchPickerID:
+		if cmd := m.openBranchPickerDialog(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	default:
 		// Unknown dialog
 		break
@@ -4807,6 +4914,70 @@ func (m *UI) openWorkflowPopupDialog() tea.Cmd {
 		m.dialog.BringToFront(m.workflowPopup.ID())
 	}
 	return nil
+}
+
+// subagentsLoadedMsg carries the persisted child sessions fetched off the
+// Update loop; the picker is built when it arrives.
+type subagentsLoadedMsg struct {
+	sessionID string
+	children  []session.Session
+}
+
+// openSubagentsDialog opens the subagents panel for the current session,
+// seeding it from ListChildren (fetched off-loop like the revert picker).
+func (m *UI) openSubagentsDialog() tea.Cmd {
+	if m.dialog.ContainsDialog(dialog.SubagentsID) {
+		m.dialog.BringToFront(dialog.SubagentsID)
+		return nil
+	}
+	if !m.hasSession() {
+		return util.ReportWarn("No active session")
+	}
+	sessionID := m.session.ID
+	return func() tea.Msg {
+		ctx := context.Background()
+		children, err := m.com.Workspace.ListChildren(ctx, sessionID)
+		if err != nil {
+			return util.ReportError(err)()
+		}
+		return subagentsLoadedMsg{sessionID: sessionID, children: children}
+	}
+}
+
+// listForksFor fetches a session's forks off the Update loop; the panel is
+// built when forksLoadedMsg comes back.
+func (m *UI) listForksFor(originID string) tea.Cmd {
+	return func() tea.Msg {
+		forks, err := m.com.Workspace.ListForks(context.Background(), originID)
+		if err != nil {
+			return util.ReportError(err)()
+		}
+		return forksLoadedMsg{originID: originID, forks: forks}
+	}
+}
+
+// openBranchPickerDialog opens the fork-point picker for the current
+// session. Messages are fetched off the Update loop; the picker is built
+// when branchPickerLoadedMsg comes back.
+func (m *UI) openBranchPickerDialog() tea.Cmd {
+	if m.dialog.ContainsDialog(dialog.BranchPickerID) {
+		m.dialog.BringToFront(dialog.BranchPickerID)
+		return nil
+	}
+	if !m.hasSession() {
+		return util.ReportWarn("No active session")
+	}
+	if m.isAgentBusy() {
+		return util.ReportWarn("Agent is busy, please wait before forking")
+	}
+	sessionID := m.session.ID
+	return func() tea.Msg {
+		msgs, err := m.com.Workspace.ListMessages(context.Background(), sessionID)
+		if err != nil {
+			return util.ReportError(err)()
+		}
+		return branchPickerLoadedMsg{sessionID: sessionID, messages: msgs}
+	}
 }
 
 // openBtwDialog opens the ephemeral side-question dialog.
@@ -5203,6 +5374,8 @@ func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
 		return m.handleReAuthenticate(n.ProviderID)
 	case notify.TypeWorkflowProgress:
 		return m.handleWorkflowProgress(n.WorkflowProgress)
+	case notify.TypeSubAgentLifecycle:
+		return m.handleSubAgentLifecycle(n.SubAgentLifecycle)
 	case notify.TypeSideQuestionProgress:
 		return m.handleSideQuestionProgress(n.Message)
 	case notify.TypeAWSSSOAuth:
@@ -5265,6 +5438,23 @@ func (m *UI) handleSideQuestionProgress(text string) tea.Cmd {
 		if btw, ok := dia.(*dialog.Btw); ok {
 			btw.HandleProgress(text)
 		}
+	}
+	return nil
+}
+
+// handleSubAgentLifecycle forwards a subagent start/done/error event to the
+// subagents panel. Events for a closed panel are dropped; the panel
+// reconstructs durable state from ListChildren when opened.
+func (m *UI) handleSubAgentLifecycle(ev *notify.SubAgentLifecycle) tea.Cmd {
+	if ev == nil {
+		return nil
+	}
+	dia := m.dialog.Dialog(dialog.SubagentsID)
+	if dia == nil {
+		return nil
+	}
+	if sub, ok := dia.(*dialog.Subagents); ok {
+		sub.HandleLifecycle(ev)
 	}
 	return nil
 }

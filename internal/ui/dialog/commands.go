@@ -560,6 +560,20 @@ func (c *Commands) defaultCommands() []*CommandItem {
 		).WithAliases("workflow", "wf").WithDescription("Show live progress of running workflow"))
 		commands = append(commands, NewCommandItem(
 			c.com.Styles,
+			"subagents",
+			"Sub-Agents",
+			"ctrl+a",
+			ActionOpenDialog{DialogID: SubagentsID},
+		).WithAliases("subagents", "agents").WithDescription("Show all sub-agents that ran in this session"))
+		commands = append(commands, NewCommandItem(
+			c.com.Styles,
+			"fork_session",
+			"Fork Session From Message",
+			"",
+			ActionOpenDialog{DialogID: BranchPickerID},
+		).WithAliases("fork", "branch").WithDescription("Create a new branch of this conversation from a past message"))
+		commands = append(commands, NewCommandItem(
+			c.com.Styles,
 			"toggle_remote_control",
 			"Remote Control",
 			"",

@@ -111,6 +111,10 @@ type Coordinator interface {
 	UpdateModels(ctx context.Context) error
 	GenerateTitle(ctx context.Context, sessionID, prompt string)
 	SideQuestion(ctx context.Context, sessionID, question string, exchanges []SideQuestionExchange) (SideQuestionResult, error)
+	// ForkSession flushes the debounced message pipeline and then forks the
+	// origin session at the given checkpoint message into a new root
+	// session. The origin is untouched.
+	ForkSession(ctx context.Context, originSessionID, checkpointMessageID, newTitle string) (session.Session, error)
 }
 
 type coordinator struct {
@@ -1351,6 +1355,16 @@ func (c *coordinator) QueuedPromptsList(sessionID string) []string {
 	return c.currentAgent.QueuedPromptsList(sessionID)
 }
 
+// ForkSession implements [Coordinator.ForkSession]. The debounced message
+// pipeline must be drained before the copy so messages still buffered in
+// memory are visible to the fork's SELECT.
+func (c *coordinator) ForkSession(ctx context.Context, originSessionID, checkpointMessageID, newTitle string) (session.Session, error) {
+	if err := c.messages.FlushAll(ctx); err != nil {
+		return session.Session{}, fmt.Errorf("flush messages before fork: %w", err)
+	}
+	return c.sessions.ForkSession(ctx, originSessionID, checkpointMessageID, newTitle)
+}
+
 func (c *coordinator) Summarize(ctx context.Context, sessionID string) error {
 	providerCfg, ok := c.cfg.Config().Providers.Get(c.currentAgent.Model().ModelCfg.Provider)
 	if !ok {
@@ -1548,6 +1562,8 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 		return fantasy.ToolResponse{}, fmt.Errorf("create session: %w", err)
 	}
 
+	c.publishSubAgentLifecycle(params.SessionID, session.ID, params.ToolCallID, params.SessionTitle, "start", "")
+
 	// Call session setup function if provided
 	if params.SessionSetup != nil {
 		params.SessionSetup(session.ID)
@@ -1591,8 +1607,11 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 		})
 	}
 	if err != nil {
+		c.publishSubAgentLifecycle(params.SessionID, session.ID, params.ToolCallID, params.SessionTitle, "error", err.Error())
 		return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to generate response: %s", err)), nil
 	}
+
+	c.publishSubAgentLifecycle(params.SessionID, session.ID, params.ToolCallID, params.SessionTitle, "done", "")
 
 	// Update parent session cost on a best-effort basis. A failure here must
 	// not discard the sub-agent output that was already produced.
@@ -1617,6 +1636,28 @@ func subAgentOutput(result *fantasy.AgentResult) string {
 		return ""
 	}
 	return result.Response.Content.Text()
+}
+
+// publishSubAgentLifecycle emits a TypeSubAgentLifecycle notification on the
+// best-effort pubsub path (lossy by design; consumers reconstruct durable
+// state from session.Service.ListChildren and overlay these events).
+func (c *coordinator) publishSubAgentLifecycle(parentSessionID, subSessionID, toolCallID, title, phase, errMsg string) {
+	if c.notify == nil {
+		return
+	}
+	c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
+		SessionID:  parentSessionID,
+		Type:       notify.TypeSubAgentLifecycle,
+		ProviderID: "",
+		SubAgentLifecycle: &notify.SubAgentLifecycle{
+			ParentSessionID: parentSessionID,
+			SubSessionID:    subSessionID,
+			ToolCallID:      toolCallID,
+			Title:           title,
+			Phase:           phase,
+			Error:           errMsg,
+		},
+	})
 }
 
 // updateParentSessionCost accumulates the cost from a child session to its parent session.

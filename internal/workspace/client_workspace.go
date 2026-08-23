@@ -160,6 +160,41 @@ func (w *ClientWorkspace) ListSessions(ctx context.Context) ([]session.Session, 
 	return sessions, nil
 }
 
+func (w *ClientWorkspace) ListChildren(ctx context.Context, sessionID string) ([]session.Session, error) {
+	protoSessions, err := w.client.ListSessionChildren(ctx, w.workspaceID(), sessionID)
+	if err != nil {
+		return nil, err
+	}
+	sessions := make([]session.Session, len(protoSessions))
+	for i, s := range protoSessions {
+		sessions[i] = protoToSession(s)
+	}
+	return sessions, nil
+}
+
+// ListForks returns sessions forked from originSessionID, oldest first.
+func (w *ClientWorkspace) ListForks(ctx context.Context, originSessionID string) ([]session.Session, error) {
+	protoSessions, err := w.client.ListForks(ctx, w.workspaceID(), originSessionID)
+	if err != nil {
+		return nil, err
+	}
+	sessions := make([]session.Session, len(protoSessions))
+	for i, s := range protoSessions {
+		sessions[i] = protoToSession(s)
+	}
+	return sessions, nil
+}
+
+// ForkSession forks via the server RPC; the server-side coordinator owns
+// the flush-before-copy ordering.
+func (w *ClientWorkspace) ForkSession(ctx context.Context, originSessionID, checkpointMessageID, newTitle string) (session.Session, error) {
+	saved, err := w.client.ForkSession(ctx, w.workspaceID(), originSessionID, checkpointMessageID, newTitle)
+	if err != nil {
+		return session.Session{}, err
+	}
+	return protoToSession(*saved), nil
+}
+
 func (w *ClientWorkspace) SaveSession(ctx context.Context, sess session.Session) (session.Session, error) {
 	saved, err := w.client.SaveSession(ctx, w.workspaceID(), sessionToProto(sess))
 	if err != nil {

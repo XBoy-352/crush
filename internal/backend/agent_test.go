@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/proto"
+	"github.com/charmbracelet/crush/internal/session"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -61,6 +62,10 @@ func (c *blockingCoordinator) GenerateTitle(context.Context, string, string)    
 
 func (c *blockingCoordinator) SideQuestion(context.Context, string, string, []agent.SideQuestionExchange) (agent.SideQuestionResult, error) {
 	return agent.SideQuestionResult{}, nil
+}
+
+func (c *blockingCoordinator) ForkSession(context.Context, string, string, string) (session.Session, error) {
+	return session.Session{}, nil
 }
 
 // insertAgentWorkspace installs a synthetic workspace with the given

@@ -119,6 +119,15 @@ type Workspace interface {
 	CreateSession(ctx context.Context, title string) (session.Session, error)
 	GetSession(ctx context.Context, sessionID string) (session.Session, error)
 	ListSessions(ctx context.Context) ([]session.Session, error)
+	// ListChildren returns the direct child (subagent) sessions of the
+	// given session, oldest first.
+	ListChildren(ctx context.Context, sessionID string) ([]session.Session, error)
+	// ListForks returns sessions forked from originSessionID, oldest first.
+	ListForks(ctx context.Context, originSessionID string) ([]session.Session, error)
+	// ForkSession flushes pending message writes, then forks originSessionID
+	// at checkpointMessageID into a new root session (original untouched)
+	// and returns it. An empty newTitle gets a generated one.
+	ForkSession(ctx context.Context, originSessionID, checkpointMessageID, newTitle string) (session.Session, error)
 	SaveSession(ctx context.Context, sess session.Session) (session.Session, error)
 	DeleteSession(ctx context.Context, sessionID string) error
 	CreateAgentToolSessionID(messageID, toolCallID string) string

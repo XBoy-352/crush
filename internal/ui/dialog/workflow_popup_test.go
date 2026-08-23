@@ -143,6 +143,53 @@ func TestWorkflowPopup_Draw(t *testing.T) {
 	require.Nil(t, cur)
 }
 
+func TestWorkflowPopup_PhaseHeader(t *testing.T) {
+	wp := newTestWorkflowPopup(t)
+
+	// No phase set yet.
+	require.Empty(t, wp.phase)
+
+	wp.HandleProgress(&notify.WorkflowProgress{
+		ToolCallID: "call_123",
+		Kind:       "agent_start",
+		Index:      0,
+		Label:      "Scout",
+		Running:    1,
+		Total:      2,
+		Phase:      "discovery",
+	})
+	require.Equal(t, "discovery", wp.phase)
+
+	wp.HandleProgress(&notify.WorkflowProgress{
+		ToolCallID: "call_123",
+		Kind:       "agent_start",
+		Index:      1,
+		Label:      "Reviewer",
+		Running:    1,
+		Total:      2,
+		Phase:      "review",
+	})
+	require.Equal(t, "review", wp.phase,
+		"a later phase event must replace the current phase header")
+
+	// Events without a phase (e.g. older producers) must not clear the
+	// current one; the header is sticky once set.
+	wp.HandleProgress(&notify.WorkflowProgress{
+		ToolCallID: "call_123",
+		Kind:       "agent_done",
+		Index:      0,
+		Running:    0,
+		Completed:  1,
+		Total:      2,
+	})
+	require.Equal(t, "review", wp.phase)
+
+	// The header must render without error.
+	scr := uv.NewScreenBuffer(80, 24)
+	cur := wp.Draw(scr, scr.Bounds())
+	require.Nil(t, cur)
+}
+
 // TestWorkflowPopup_DropsStaleSeq pins the out-of-order guard: a packet whose
 // Seq is not greater than the last applied one must be dropped, so a stale
 // agent_start cannot resurrect an agent that already reported done.

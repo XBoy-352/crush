@@ -60,6 +60,10 @@ type Session struct {
 	Todos            []Todo
 	CreatedAt        int64
 	UpdatedAt        int64
+	// ForkedFromSessionID is the session this one was forked from, empty for
+	// non-forked sessions. Forks are root sessions; parent_session_id is
+	// reserved for agent-tool sub-sessions.
+	ForkedFromSessionID string
 }
 
 type Service interface {
@@ -74,6 +78,16 @@ type Service interface {
 	// oldest first. [Service.List] deliberately returns only root sessions,
 	// so this is the only way to reach sub-agent and title sessions.
 	ListChildren(ctx context.Context, parentSessionID string) ([]Session, error)
+	// ListForks returns the sessions forked from originSessionID, oldest
+	// first. Empty when the session has never been forked.
+	ListForks(ctx context.Context, originSessionID string) ([]Session, error)
+	// ForkSession creates a new root session containing a copy of the
+	// origin session's messages strictly before checkpointMessageID. The
+	// origin is left untouched; the fork records its lineage in
+	// ForkedFromSessionID. A fork point at or after the last summary leaves
+	// the summary out of the copy and nulls SummaryMessageID on the fork
+	// (forking is non-destructive, so ErrRevertPastSummary does not apply).
+	ForkSession(ctx context.Context, originSessionID, checkpointMessageID, newTitle string) (Session, error)
 	Save(ctx context.Context, session Session) (Session, error)
 	UpdateTitleAndUsage(ctx context.Context, sessionID, title string, promptTokens, completionTokens int64, cost float64) error
 	Rename(ctx context.Context, id string, title string) error
@@ -282,6 +296,73 @@ func (s *service) ListChildren(ctx context.Context, parentSessionID string) ([]S
 	return sessions, nil
 }
 
+func (s *service) ListForks(ctx context.Context, originSessionID string) ([]Session, error) {
+	if originSessionID == "" {
+		return []Session{}, nil
+	}
+	dbSessions, err := s.q.ListForks(ctx, sql.NullString{String: originSessionID, Valid: true})
+	if err != nil {
+		return nil, err
+	}
+	sessions := make([]Session, len(dbSessions))
+	for i, dbSession := range dbSessions {
+		sessions[i] = s.fromDBItem(dbSession)
+		s.applyEstimatedUsageState(&sessions[i])
+	}
+	return sessions, nil
+}
+
+// ForkSession implements [Service.ForkSession]. The whole fork (session row
+// plus message copy) happens in one transaction so a crash cannot leave an
+// empty fork. FlushAll is not needed here the way it is for revert: the copy
+// reads committed rows via SQL, but the caller MUST have flushed the
+// debounced message pipeline first or messages still in memory are invisible
+// to the SELECT — see coordinator.ForkSession for the flush ordering.
+func (s *service) ForkSession(ctx context.Context, originSessionID, checkpointMessageID, newTitle string) (Session, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Session{}, fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	qtx := s.q.WithTx(tx)
+
+	// Verify the checkpoint belongs to the origin session before creating
+	// anything; the rowid subquery silently copies nothing on a mismatch.
+	cp, err := qtx.GetMessage(ctx, checkpointMessageID)
+	if err != nil {
+		return Session{}, fmt.Errorf("get checkpoint message: %w", err)
+	}
+	if cp.SessionID != originSessionID {
+		return Session{}, fmt.Errorf("checkpoint message %s does not belong to session %s", checkpointMessageID, originSessionID)
+	}
+
+	dbFork, err := qtx.CreateForkedSession(ctx, db.CreateForkedSessionParams{
+		ID:                  uuid.New().String(),
+		Title:               newTitle,
+		ForkedFromSessionID: sql.NullString{String: originSessionID, Valid: true},
+	})
+	if err != nil {
+		return Session{}, fmt.Errorf("creating forked session: %w", err)
+	}
+
+	if err = qtx.CopyMessagesUpToCheckpoint(ctx, db.CopyMessagesUpToCheckpointParams{
+		SessionID:    originSessionID,
+		CheckpointID: checkpointMessageID,
+		NewSessionID: dbFork.ID,
+	}); err != nil {
+		return Session{}, fmt.Errorf("copying messages into fork: %w", err)
+	}
+
+	if err = tx.Commit(); err != nil {
+		return Session{}, fmt.Errorf("committing transaction: %w", err)
+	}
+
+	fork := s.fromDBItem(dbFork)
+	s.Publish(pubsub.CreatedEvent, fork)
+	return fork, nil
+}
+
 // publishSessionUpdate re-fetches a session and publishes an UpdatedEvent so
 // that UI subscribers reflect title or usage changes.
 func (s *service) publishSessionUpdate(ctx context.Context, sessionID string) {
@@ -321,17 +402,18 @@ func (s *service) fromDBItem(item db.Session) Session {
 		slog.Error("Failed to unmarshal todos", "session_id", item.ID, "error", err)
 	}
 	return Session{
-		ID:               item.ID,
-		ParentSessionID:  item.ParentSessionID.String,
-		Title:            item.Title,
-		MessageCount:     item.MessageCount,
-		PromptTokens:     item.PromptTokens,
-		CompletionTokens: item.CompletionTokens,
-		SummaryMessageID: item.SummaryMessageID.String,
-		Cost:             item.Cost,
-		Todos:            todos,
-		CreatedAt:        item.CreatedAt,
-		UpdatedAt:        item.UpdatedAt,
+		ID:                  item.ID,
+		ParentSessionID:     item.ParentSessionID.String,
+		Title:               item.Title,
+		MessageCount:        item.MessageCount,
+		PromptTokens:        item.PromptTokens,
+		CompletionTokens:    item.CompletionTokens,
+		SummaryMessageID:    item.SummaryMessageID.String,
+		Cost:                item.Cost,
+		Todos:               todos,
+		CreatedAt:           item.CreatedAt,
+		UpdatedAt:           item.UpdatedAt,
+		ForkedFromSessionID: item.ForkedFromSessionID.String,
 	}
 }
 

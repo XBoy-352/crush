@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -58,6 +59,14 @@ func (m *mockSessionService) List(context.Context) ([]session.Session, error) {
 
 func (m *mockSessionService) ListChildren(context.Context, string) ([]session.Session, error) {
 	return nil, nil
+}
+
+func (m *mockSessionService) ListForks(context.Context, string) ([]session.Session, error) {
+	return nil, nil
+}
+
+func (m *mockSessionService) ForkSession(context.Context, string, string, string) (session.Session, error) {
+	return session.Session{}, errors.New("not implemented in mock")
 }
 
 func (m *mockSessionService) Save(_ context.Context, s session.Session) (session.Session, error) {

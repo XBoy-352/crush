@@ -58,6 +58,10 @@ func (s *stubCoordinator) SideQuestion(context.Context, string, string, []agent.
 	return agent.SideQuestionResult{}, nil
 }
 
+func (s *stubCoordinator) ForkSession(context.Context, string, string, string) (session.Session, error) {
+	return session.Session{}, nil
+}
+
 // stubSessions is a minimal session.Service that returns a fixed list
 // (and supports Get by ID). All other methods return zero values; the
 // IsBusy tests do not exercise them.

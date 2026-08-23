@@ -77,6 +77,40 @@ WHERE id IN (
           WHERE cp.id = sqlc.arg(checkpoint_id) AND cp.session_id = sqlc.arg(session_id)
       )
 );
+
+-- name: CopyMessagesUpToCheckpoint :exec
+-- Copies every message strictly BEFORE the checkpoint message into a new
+-- session, preserving original insertion order via the source rowid cut.
+-- Each copy gets a freshly generated ID because messages.id is a global
+-- PRIMARY KEY, so original IDs cannot be reused across sessions.
+INSERT INTO messages (
+    id,
+    session_id,
+    role,
+    parts,
+    model,
+    provider,
+    is_summary_message,
+    created_at,
+    updated_at
+)
+SELECT
+    lower(hex(randomblob(16))),
+    sqlc.arg(new_session_id),
+    m.role,
+    m.parts,
+    m.model,
+    m.provider,
+    0,
+    strftime('%s', 'now'),
+    strftime('%s', 'now')
+FROM messages m
+WHERE m.session_id = sqlc.arg(session_id)
+  AND m.rowid < (
+      SELECT cp.rowid FROM messages cp
+      WHERE cp.id = sqlc.arg(checkpoint_id) AND cp.session_id = sqlc.arg(session_id)
+  )
+ORDER BY m.rowid ASC;
 -- name: GetLastAssistantMessageBySession :one
 SELECT *
 FROM messages

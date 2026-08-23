@@ -29,6 +29,12 @@ type Session struct {
 	AttachedClients  int     `json:"attached_clients"`
 }
 
+// ForkSessionRequest is the body for the session-fork endpoint.
+type ForkSessionRequest struct {
+	CheckpointMessageID string `json:"checkpoint_message_id"`
+	Title               string `json:"title,omitempty"`
+}
+
 // Todo represents a single todo entry on a session in the proto layer.
 type Todo struct {
 	Content    string `json:"content"`

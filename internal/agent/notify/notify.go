@@ -39,6 +39,11 @@ const (
 // TypeWorkflowProgress indicates the workflow engine has new live progress.
 const TypeWorkflowProgress Type = "workflow_progress"
 
+// TypeSubAgentLifecycle indicates a subagent started, completed, or failed.
+// Emitted from runSubAgent for every subagent path (agent tool, workflow,
+// agentic fetch).
+const TypeSubAgentLifecycle Type = "subagent_lifecycle"
+
 // TypeSideQuestionProgress indicates new streamed content for an ephemeral side question.
 const TypeSideQuestionProgress Type = "side_question_progress"
 
@@ -53,6 +58,21 @@ type WorkflowProgress struct {
 	Running    int
 	Completed  int
 	Total      int
+	Phase      string
+}
+
+// SubAgentLifecycle carries a subagent start/done/error transition. Events
+// are idempotent upserts keyed by SubSessionID: the panel reconstructs
+// durable state from session.Service.ListChildren and overlays these.
+type SubAgentLifecycle struct {
+	ParentSessionID string
+	SubSessionID    string
+	ToolCallID      string
+	Title           string
+	// Phase is "start", "done", or "error".
+	Phase string
+	// Error carries the failure text when Phase is "error".
+	Error string
 }
 
 // Notification represents a domain event published by the agent.
@@ -73,6 +93,9 @@ type Notification struct {
 	// WorkflowProgress carries live progress for a running workflow tool.
 	// Only populated when Type is TypeWorkflowProgress.
 	WorkflowProgress *WorkflowProgress
+	// SubAgentLifecycle carries a subagent transition. Only populated when
+	// Type is TypeSubAgentLifecycle.
+	SubAgentLifecycle *SubAgentLifecycle
 	// RetryDelay is how long the agent will wait before the next
 	// attempt when Type is TypeRetry.
 	RetryDelay time.Duration
