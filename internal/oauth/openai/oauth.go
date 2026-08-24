@@ -30,6 +30,11 @@ const (
 	deviceRedirectURI = defaultIssuer + "/deviceauth/callback"
 
 	userAgent = "crush"
+
+	// CodexBaseURL is the ChatGPT backend that subscription OAuth tokens
+	// authenticate against. They are rejected by the api.openai.com
+	// platform API.
+	CodexBaseURL = "https://chatgpt.com/backend-api/codex"
 )
 
 // Overridable for tests.

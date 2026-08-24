@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"os"
@@ -10,6 +11,8 @@ import (
 	"testing"
 
 	"charm.land/catwalk/pkg/catwalk"
+	"github.com/charmbracelet/crush/internal/oauth"
+	openaioauth "github.com/charmbracelet/crush/internal/oauth/openai"
 	"github.com/stretchr/testify/require"
 )
 
@@ -475,4 +478,34 @@ func TestFixGrok46Context_NoXAI(t *testing.T) {
 	providers := []catwalk.Provider{{ID: "openrouter"}}
 	fixGrok46Context(providers)
 	require.Empty(t, providers[0].Models)
+}
+
+func TestSetupOpenAIOAuth_RoutesToCodexBackend(t *testing.T) {
+	t.Parallel()
+
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{
+		"https://api.openai.com/auth": {"chatgpt_account_id": "acct_123"}
+	}`))
+	pc := ProviderConfig{
+		ID:     "openai",
+		APIKey: "oauth-access-token",
+		OAuthToken: &oauth.Token{
+			AccessToken: "hdr." + payload + ".sig",
+			ExpiresIn:   60,
+		},
+	}
+	pc.OAuthToken.SetExpiresAt()
+
+	pc.SetupOpenAIOAuth()
+	require.Equal(t, openaioauth.CodexBaseURL, pc.BaseURL)
+	require.Equal(t, "acct_123", pc.ExtraHeaders["ChatGPT-Account-ID"])
+}
+
+func TestSetupOpenAIOAuth_NoTokenIsNoop(t *testing.T) {
+	t.Parallel()
+
+	pc := ProviderConfig{ID: "openai", BaseURL: "https://example.com/v1"}
+	pc.SetupOpenAIOAuth()
+	require.Equal(t, "https://example.com/v1", pc.BaseURL)
+	require.Empty(t, pc.ExtraHeaders)
 }
