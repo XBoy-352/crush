@@ -129,6 +129,21 @@ func (w *countingWorkspace) LSPGetDiagnosticCounts(name string) lsp.DiagnosticCo
 	return w.lspDiags[name]
 }
 
+func (w *countingWorkspace) AgentModel() workspace.AgentModel {
+	w.modelCalls++
+	return w.model
+}
+
+func (w *countingWorkspace) LSPGetStates() map[string]workspace.LSPClientInfo {
+	w.lspStateCalls++
+	return w.lspStates
+}
+
+func (w *countingWorkspace) LSPGetDiagnosticCounts(name string) lsp.DiagnosticCounts {
+	w.lspDiagCalls++
+	return w.lspDiags[name]
+}
+
 func (w *countingWorkspace) ListMessages(context.Context, string) ([]message.Message, error) {
 	return nil, nil
 }
