@@ -97,6 +97,7 @@ type (
 		ClientID    string
 		Arguments   []commands.Argument
 		Args        map[string]string // Actual argument values
+		Body        string            // Trailing text after the command name
 	}
 	// ActionRenameSession is a message to rename the current session.
 	ActionRenameSession struct{}
