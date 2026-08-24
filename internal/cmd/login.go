@@ -1,8 +1,8 @@
 package cmd
 
 import (
-	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -260,7 +260,7 @@ func loginOpenAI(ws workspace.Workspace, force bool) error {
 		return err
 	}
 
-	if err := cmp.Or(
+	if err := errors.Join(
 		ws.SetConfigField(config.ScopeGlobal, "providers.openai.api_key", token.AccessToken),
 		ws.SetConfigField(config.ScopeGlobal, "providers.openai.oauth", token),
 	); err != nil {
@@ -312,7 +312,7 @@ func loginXAI(ws workspace.Workspace, force bool) error {
 		return err
 	}
 
-	if err := cmp.Or(
+	if err := errors.Join(
 		ws.SetConfigField(config.ScopeGlobal, "providers.xai.api_key", token.AccessToken),
 		ws.SetConfigField(config.ScopeGlobal, "providers.xai.oauth", token),
 	); err != nil {
