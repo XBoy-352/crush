@@ -834,13 +834,15 @@ func sessionWriter(ctx context.Context, contentHeight int) (io.Writer, func(), b
 		return colorprofile.NewWriter(os.Stdout, os.Environ()), func() {}, false
 	}
 
-	return &colorprofile.Writer{
-			Forward: pipe,
-			Profile: profile,
-		}, func() {
-			pipe.Close()
-			_ = cmd.Wait()
-		}, true
+	writer := &colorprofile.Writer{
+		Forward: pipe,
+		Profile: profile,
+	}
+	cleanup := func() {
+		pipe.Close()
+		_ = cmd.Wait()
+	}
+	return writer, cleanup, true
 }
 
 type sessionShowMeta struct {
