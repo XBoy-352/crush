@@ -115,21 +115,21 @@ func transcribeImageParts(
 		}
 		parts := history[i].Content
 		replaced := false
-		for j, part := range parts {
+		kept := parts[:0]
+		for _, part := range parts {
 			filePart, ok := fantasy.AsMessagePart[fantasy.FilePart](part)
 			if !ok || !isImageMediaType(filePart.MediaType) {
+				kept = append(kept, part)
 				continue
 			}
 			desc, described := describe(filePart)
-			if described {
-				parts[j] = fantasy.TextPart{Text: fmt.Sprintf("<image filename=%q>\n%s\n</image>", filePart.Filename, desc)}
-				replaced = true
-			} else {
-				parts = append(parts[:j], parts[j+1:]...)
-				j--
+			if !described {
+				continue
 			}
+			kept = append(kept, fantasy.TextPart{Text: fmt.Sprintf("<image filename=%q>\n%s\n</image>", filePart.Filename, desc)})
+			replaced = true
 		}
-		history[i].Content = parts
+		history[i].Content = kept
 		if replaced {
 			history[i].ProviderOptions = nil
 		}
