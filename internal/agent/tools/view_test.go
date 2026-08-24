@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -170,6 +171,67 @@ func TestViewToolBlocksOversizedImages(t *testing.T) {
 
 	require.True(t, resp.IsError)
 	require.Contains(t, resp.Content, "Image file is too large")
+}
+
+func TestViewToolVisionFallbackDescribesImage(t *testing.T) {
+	t.Parallel()
+
+	// Minimal valid PNG so the sniffed media type is image/png.
+	pngMagic := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a}
+	workingDir := t.TempDir()
+	filePath := filepath.Join(workingDir, "shot.png")
+	require.NoError(t, os.WriteFile(filePath, pngMagic, 0o644))
+
+	tool := newViewToolForTest(workingDir)
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+	ctx = context.WithValue(ctx, SupportsImagesContextKey, false)
+	ctx = context.WithValue(ctx, VisionDescribeFuncContextKey,
+		DescribeImageFunc(func(_ context.Context, data []byte, mediaType string) (string, error) {
+			require.Equal(t, pngMagic, data)
+			require.Equal(t, "image/png", mediaType)
+			return "A screenshot of a login form.", nil
+		}))
+
+	resp := runViewTool(t, tool, ctx, ViewParams{FilePath: filePath})
+	require.False(t, resp.IsError)
+	require.Contains(t, resp.Content, "[Image: "+filePath+"]")
+	require.Contains(t, resp.Content, "A screenshot of a login form.")
+}
+
+func TestViewToolVisionFallbackWithoutDescribeFuncErrors(t *testing.T) {
+	t.Parallel()
+
+	workingDir := t.TempDir()
+	filePath := filepath.Join(workingDir, "shot.png")
+	require.NoError(t, os.WriteFile(filePath, []byte{0x89, 'P', 'N', 'G'}, 0o644))
+
+	tool := newViewToolForTest(workingDir)
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+	ctx = context.WithValue(ctx, SupportsImagesContextKey, false)
+
+	resp := runViewTool(t, tool, ctx, ViewParams{FilePath: filePath})
+	require.True(t, resp.IsError)
+	require.Contains(t, resp.Content, "does not support image data")
+}
+
+func TestViewToolVisionFallbackDescribeErrorFallsBackToError(t *testing.T) {
+	t.Parallel()
+
+	workingDir := t.TempDir()
+	filePath := filepath.Join(workingDir, "shot.png")
+	require.NoError(t, os.WriteFile(filePath, []byte{0x89, 'P', 'N', 'G'}, 0o644))
+
+	tool := newViewToolForTest(workingDir)
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+	ctx = context.WithValue(ctx, SupportsImagesContextKey, false)
+	failing := DescribeImageFunc(func(context.Context, []byte, string) (string, error) {
+		return "", errors.New("vision model unavailable")
+	})
+	ctx = context.WithValue(ctx, VisionDescribeFuncContextKey, failing)
+
+	resp := runViewTool(t, tool, ctx, ViewParams{FilePath: filePath})
+	require.True(t, resp.IsError)
+	require.Contains(t, resp.Content, "does not support image data")
 }
 
 func TestReadTextFileEnforcesMaxContentSize(t *testing.T) {
