@@ -20,6 +20,18 @@ import (
 // CommandsID is the identifier for the commands dialog.
 const CommandsID = "commands"
 
+// commandBody extracts the trailing text after the first token of a command
+// palette filter value. For "/ponytail create a branch" it returns
+// "create a branch"; for "/ponytail" it returns "".
+func commandBody(filter string) string {
+	trimmed := strings.TrimSpace(filter)
+	if trimmed == "" {
+		return ""
+	}
+	_, body, _ := strings.Cut(trimmed, " ")
+	return strings.TrimSpace(body)
+}
+
 // CommandType represents the type of commands being displayed.
 type CommandType uint
 
@@ -206,7 +218,14 @@ func (c *Commands) HandleMsg(msg tea.Msg) Action {
 		case key.Matches(msg, c.keyMap.Select):
 			if selectedItem := c.list.SelectedItem(); selectedItem != nil {
 				if item, ok := selectedItem.(*CommandItem); ok && item != nil {
-					return item.Action()
+					action := item.Action()
+					// When the user typed "/name <text>" as the filter, carry
+					// the trailing text into the action as the message body.
+					if mcpAction, ok := action.(ActionRunMCPPrompt); ok && mcpAction.Body == "" {
+						mcpAction.Body = commandBody(c.input.Value())
+						action = mcpAction
+					}
+					return action
 				}
 			}
 		case key.Matches(msg, c.keyMap.Tab):

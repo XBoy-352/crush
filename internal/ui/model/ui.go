@@ -2375,7 +2375,7 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		m.dialog.CloseFrontDialog()
 		cmds = append(cmds, m.attachSkill(msg.ID, msg.Name))
 	case dialog.ActionRunMCPPrompt:
-		if len(msg.Arguments) > 0 && msg.Args == nil {
+		if hasRequiredArgs(msg.Arguments) && msg.Args == nil {
 			m.dialog.CloseFrontDialog()
 			title := cmp.Or(msg.Title, "MCP Prompt Arguments")
 			argsDialog := dialog.NewArguments(
@@ -2388,7 +2388,7 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			m.dialog.OpenDialog(argsDialog)
 			break
 		}
-		cmds = append(cmds, m.runMCPPrompt(msg.ClientID, msg.PromptID, msg.Args))
+		cmds = append(cmds, m.runMCPPrompt(msg.ClientID, msg.PromptID, msg.Args, msg.Body))
 	case dialog.ActionRevertToMessage:
 		if m.isAgentBusy() {
 			cmds = append(cmds, util.ReportWarn("Agent is busy, please wait..."))
@@ -3038,6 +3038,16 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 
 				m.randomizePlaceholders()
 				m.historyReset()
+
+				// Slash-command support: "/command-name <text>" resolves a
+				// matching MCP prompt or custom command and sends the trailing
+				// text as the message body with the command's instructions
+				// prepended, instead of sending "/command-name ..." literally.
+				// Unknown commands fall through to a normal send so plain text
+				// starting with "/" still works.
+				if cmd := m.handleSlashCommand(value, attachments); cmd != nil {
+					return tea.Batch(cmd, m.loadPromptHistory())
+				}
 
 				return tea.Batch(m.sendMessage(value, attachments...), m.loadPromptHistory())
 			case key.Matches(msg, m.keyMap.Chat.NewSession):
@@ -5991,7 +6001,19 @@ func (m *UI) drawSessionDetails(scr uv.Screen, area uv.Rectangle) {
 	).Draw(scr, area)
 }
 
-func (m *UI) runMCPPrompt(clientID, promptID string, arguments map[string]string) tea.Cmd {
+// hasRequiredArgs reports whether any argument is required. MCP prompts whose
+// arguments are all optional (e.g. ponytail's mode) run directly with defaults
+// instead of forcing an arguments dialog.
+func hasRequiredArgs(args []commands.Argument) bool {
+	for _, a := range args {
+		if a.Required {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *UI) runMCPPrompt(clientID, promptID string, arguments map[string]string, body string) tea.Cmd {
 	load := func() tea.Msg {
 		prompt, err := m.com.Workspace.GetMCPPrompt(clientID, promptID, arguments)
 		if err != nil {
@@ -6002,8 +6024,12 @@ func (m *UI) runMCPPrompt(clientID, promptID string, arguments map[string]string
 		if prompt == "" {
 			return nil
 		}
+		content := prompt
+		if body != "" {
+			content = prompt + "\n\n" + body
+		}
 		return sendMessageMsg{
-			Content: prompt,
+			Content: content,
 		}
 	}
 
@@ -6016,6 +6042,72 @@ func (m *UI) runMCPPrompt(clientID, promptID string, arguments map[string]string
 	})
 
 	return tea.Sequence(cmds...)
+}
+
+// handleSlashCommand resolves a "/command-name <text>" input against the
+// loaded MCP prompts and custom commands. When it matches an MCP prompt it
+// fetches the prompt's instructions (with default args, no args dialog) and
+// returns a command that sends the trailing text as the user message with the
+// instructions prepended. A matching custom command substitutes its content
+// and arguments. Returns nil when there is no match so the caller falls
+// through to a normal send.
+func (m *UI) handleSlashCommand(value string, attachments []message.Attachment) tea.Cmd {
+	trimmed := strings.TrimSpace(value)
+	if !strings.HasPrefix(trimmed, "/") {
+		return nil
+	}
+	rest := strings.TrimPrefix(trimmed, "/")
+	name, body, _ := strings.Cut(rest, " ")
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	body = strings.TrimSpace(body)
+
+	// Match MCP prompts by name or ID.
+	for _, p := range m.mcpPrompts {
+		if p.PromptID != name && p.ID != name {
+			continue
+		}
+		// Fetch the prompt with default args (no args dialog) and send the
+		// body as the message with the instructions prepended.
+		load := func() tea.Msg {
+			prompt, err := m.com.Workspace.GetMCPPrompt(p.ClientID, p.PromptID, nil)
+			if err != nil {
+				return util.ReportError(err)()
+			}
+			if prompt == "" {
+				return nil
+			}
+			content := prompt
+			if body != "" {
+				content = prompt + "\n\n" + body
+			}
+			return sendMessageMsg{Content: content, Attachments: attachments}
+		}
+		return tea.Batch(load)
+	}
+
+	// Match custom commands by name or ID.
+	for _, c := range m.customCommands {
+		if c.Name != name && c.ID != name {
+			continue
+		}
+		if c.Skill != nil {
+			return m.attachSkill(c.Skill.SkillFilePath, c.Skill.Name)
+		}
+		content := c.Content
+		if body != "" {
+			content = c.Content + "\n\n" + body
+		}
+		// Defer to the sendMessageMsg handler so session creation and agent
+		// submission happen on the tea runtime, not during input handling.
+		return func() tea.Msg {
+			return sendMessageMsg{Content: content, Attachments: attachments}
+		}
+	}
+
+	return nil
 }
 
 func (m *UI) handleStateChanged() tea.Cmd {

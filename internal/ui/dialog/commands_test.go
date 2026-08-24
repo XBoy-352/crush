@@ -43,3 +43,13 @@ func TestCommands_DefaultCommands_IncludesWorkflowProgress(t *testing.T) {
 	}
 	require.True(t, found, "expected workflow_progress command in default system commands")
 }
+
+func TestCommandBody(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "create a branch", commandBody("/ponytail create a branch"))
+	require.Equal(t, "", commandBody("/ponytail"))
+	require.Equal(t, "", commandBody(""))
+	require.Equal(t, "a b c", commandBody("/cmd a b c"))
+	require.Equal(t, "text", commandBody("  /cmd   text  "))
+}
