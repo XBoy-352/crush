@@ -1,8 +1,8 @@
 package cmd
 
 import (
-	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -107,7 +107,7 @@ crush logout xai
 func logoutHyper(c *client.Client, wsID string) error {
 	ctx := getLogoutContext()
 
-	if err := cmp.Or(
+	if err := errors.Join(
 		c.RemoveConfigField(ctx, wsID, config.ScopeGlobal, "providers.hyper.api_key"),
 		c.RemoveConfigField(ctx, wsID, config.ScopeGlobal, "providers.hyper.oauth"),
 	); err != nil {
@@ -121,7 +121,7 @@ func logoutHyper(c *client.Client, wsID string) error {
 func logoutCopilot(c *client.Client, wsID string) error {
 	ctx := getLogoutContext()
 
-	if err := cmp.Or(
+	if err := errors.Join(
 		c.RemoveConfigField(ctx, wsID, config.ScopeGlobal, "providers.copilot.api_key"),
 		c.RemoveConfigField(ctx, wsID, config.ScopeGlobal, "providers.copilot.oauth"),
 	); err != nil {
@@ -135,7 +135,7 @@ func logoutCopilot(c *client.Client, wsID string) error {
 func logoutOpenAI(c *client.Client, wsID string) error {
 	ctx := getLogoutContext()
 
-	if err := cmp.Or(
+	if err := errors.Join(
 		c.RemoveConfigField(ctx, wsID, config.ScopeGlobal, "providers.openai.api_key"),
 		c.RemoveConfigField(ctx, wsID, config.ScopeGlobal, "providers.openai.oauth"),
 		c.RemoveConfigField(ctx, wsID, config.ScopeGlobal, "providers.openai.extra_headers.ChatGPT-Account-ID"),
@@ -150,7 +150,7 @@ func logoutOpenAI(c *client.Client, wsID string) error {
 func logoutXAI(c *client.Client, wsID string) error {
 	ctx := getLogoutContext()
 
-	if err := cmp.Or(
+	if err := errors.Join(
 		c.RemoveConfigField(ctx, wsID, config.ScopeGlobal, "providers.xai.api_key"),
 		c.RemoveConfigField(ctx, wsID, config.ScopeGlobal, "providers.xai.oauth"),
 	); err != nil {
