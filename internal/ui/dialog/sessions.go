@@ -59,6 +59,7 @@ type Session struct {
 		CancelRename  key.Binding
 		ConfirmDelete key.Binding
 		CancelDelete  key.Binding
+		ShowForks     key.Binding
 		Close         key.Binding
 	}
 }
@@ -137,6 +138,10 @@ func NewSessions(com *common.Common, selectedSessionID string, startInRenameMode
 	s.keyMap.CancelDelete = key.NewBinding(
 		key.WithKeys("n", "esc"),
 		key.WithHelp("n", "cancel"),
+	)
+	s.keyMap.ShowForks = key.NewBinding(
+		key.WithKeys("ctrl+f"),
+		key.WithHelp("ctrl+f", "show branches"),
 	)
 	s.keyMap.Close = CloseKey
 
@@ -223,6 +228,16 @@ func (s *Session) HandleMsg(msg tea.Msg) Action {
 					sessionItem := item.(*SessionItem)
 					return ActionSelectSession{sessionItem.Session}
 				}
+			case key.Matches(msg, s.keyMap.ShowForks):
+				item := s.list.SelectedItem()
+				if item == nil {
+					break
+				}
+				sessionItem, ok := item.(*SessionItem)
+				if !ok {
+					break
+				}
+				return ActionShowForks{OriginSessionID: sessionItem.Session.ID}
 			default:
 				var cmd tea.Cmd
 				s.input, cmd = s.input.Update(msg)

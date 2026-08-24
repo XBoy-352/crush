@@ -13,6 +13,17 @@ A workflow allows you to write and execute a Lua orchestration script to run a f
 
 You must write **plain synchronous Lua only**. The sandbox exposes only `base`, `table`, `string`, and `math` libraries — no `os`, `io`, `require`, `debug`, `dofile`, or `loadfile`.
 
+### The `args` global
+
+If the tool call includes an `args` object, it is exposed to the script as a global table of string key/value pairs. Use it to parameterize a workflow instead of hardcoding values:
+
+```lua
+-- invoked with args = {file = "main.go", focus = "error handling"}
+agent("Review " .. args.file .. " with focus on " .. args.focus)
+```
+
+`args` is only defined when the caller supplied it; check with `type(args) == "table"` if unsure.
+
 ### Per-agent options
 
 Both `agent()` and each `parallel()` entry accept the following options:
@@ -31,9 +42,11 @@ Unknown values for `model` or `agent` raise a Lua error naming the valid set.
 | Lua call | behavior |
 |---|---|
 | `agent(prompt)` | blocks, returns string. Throws on: empty/non-string prompt, agent cap exceeded, spawn error, cancellation. |
-| `agent(prompt, {label = "...", json = true, model = "small", agent = "coder"})` | `label` sets the display title; `json = true` passes the result through a JSON extractor (throws if no JSON found). `model` and `agent` select model size and profile. |
-| `parallel(calls)` | `calls`: non-empty 1-indexed table of `{prompt = string, label = string, json = bool, model = string, agent = string}`. Validates ALL entries and the cap **before** starting any. Returns table (input order) of `{ok = true, value, label}` or `{ok = false, error = string, label}`. Individual spawn errors become `{ok = false}` entries; only validation/cap failures throw. |
+| `agent(prompt, {label = "...", json = true, model = "small", agent = "coder", schema = {...}})` | `label` sets the display title; `json = true` passes the result through a JSON extractor (throws if no JSON found). `model` and `agent` select model size and profile. `schema` is an optional JSON-schema table; the agent's JSON output is validated against it and a mismatch throws with the validation errors. |
+| `parallel(calls)` | `calls`: non-empty 1-indexed table of `{prompt = string, label = string, json = bool, model = string, agent = string, schema = table}`. Validates ALL entries and the cap **before** starting any. Returns table (input order) of `{ok = true, value, label}` or `{ok = false, error = string, label}`. Individual spawn errors become `{ok = false}` entries; only validation/cap failures throw. |
+| `pipeline(items, stages)` | `items`: non-empty array of strings; `stages`: non-empty array of `{prompt = string, label = string, json = bool, model = string, agent = string, schema = table}`. Each item runs its stages **sequentially**; stage prompts may contain `{{item}}` (replaced by the item) and `{{output}}` (replaced by the previous stage's raw output; empty for stage 1). Items run concurrently up to Max Concurrent. Returns one entry per item: `{ok = true, value = last stage output, item}` or `{ok = false, error, item}`. A stage failure fails only that item. |
 | `log(msg)` | coerces to string via Lua tostring (tables become empty string), truncates to 2048 bytes, keeps first 200 entries. |
+| `phase(name)` | display-only marker grouping subsequent agents under a named phase header in the workflow popup. Must be a non-empty string. |
 | `return <value>` | value must be JSON-serializable; becomes the workflow return value. Empty tables `{}` serialize as `[]`. |
 
 ## Examples

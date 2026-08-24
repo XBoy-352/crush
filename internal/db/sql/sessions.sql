@@ -23,6 +23,43 @@ INSERT INTO sessions (
     strftime('%s', 'now')
 ) RETURNING *;
 
+-- name: CreateForkedSession :one
+-- A fork is a root session (parent_session_id NULL) that records its origin
+-- in forked_from_session_id, so it shows up in ListSessions and remains
+-- continuable while the lineage stays traceable.
+INSERT INTO sessions (
+    id,
+    parent_session_id,
+    title,
+    message_count,
+    prompt_tokens,
+    completion_tokens,
+    cost,
+    summary_message_id,
+    forked_from_session_id,
+    updated_at,
+    created_at
+) VALUES (
+    ?,
+    null,
+    ?,
+    ?,
+    ?,
+    ?,
+    ?,
+    null,
+    ?,
+    strftime('%s', 'now'),
+    strftime('%s', 'now')
+) RETURNING *;
+
+-- name: ListForks :many
+-- created_at is second-precision, so tie-break on insertion order.
+SELECT *
+FROM sessions
+WHERE forked_from_session_id = ?
+ORDER BY created_at ASC, rowid ASC;
+
 -- name: GetSessionByID :one
 SELECT *
 FROM sessions

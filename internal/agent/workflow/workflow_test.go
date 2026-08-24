@@ -40,6 +40,61 @@ func TestWorkflowRun_Basic(t *testing.T) {
 	require.Equal(t, 1, res.AgentCount)
 }
 
+func TestWorkflowRun_Args(t *testing.T) {
+	t.Parallel()
+
+	t.Run("hydrated as global table", func(t *testing.T) {
+		t.Parallel()
+		script := `return args`
+		res, err := Run(context.Background(), script, nil, Options{
+			Args: map[string]string{"name": "x", "target": "src/main.go"},
+		})
+		require.NoError(t, err)
+		require.JSONEq(t, `{"name":"x","target":"src/main.go"}`, res.Value)
+	})
+
+	t.Run("script reads args values", func(t *testing.T) {
+		t.Parallel()
+		script := `return args.name == "x"`
+		res, err := Run(context.Background(), script, nil, Options{
+			Args: map[string]string{"name": "x"},
+		})
+		require.NoError(t, err)
+		require.JSONEq(t, "true", res.Value)
+	})
+
+	t.Run("args usable in prompts", func(t *testing.T) {
+		t.Parallel()
+		script := `agent("review " .. args.file)`
+		var prompt string
+		spawn := func(_ context.Context, _ int, _, p string, _ SpawnOpts) (string, error) {
+			prompt = p
+			return "ok", nil
+		}
+		_, err := Run(context.Background(), script, spawn, Options{
+			Args: map[string]string{"file": "main.go"},
+		})
+		require.NoError(t, err)
+		require.Equal(t, "review main.go", prompt)
+	})
+
+	t.Run("nil args leaves global unset", func(t *testing.T) {
+		t.Parallel()
+		script := `return type(args)`
+		res, err := Run(context.Background(), script, nil, Options{})
+		require.NoError(t, err)
+		require.JSONEq(t, `"nil"`, res.Value)
+	})
+
+	t.Run("empty args leaves global unset", func(t *testing.T) {
+		t.Parallel()
+		script := `return type(args)`
+		res, err := Run(context.Background(), script, nil, Options{Args: map[string]string{}})
+		require.NoError(t, err)
+		require.JSONEq(t, `"nil"`, res.Value)
+	})
+}
+
 func TestWorkflowRun_ReturnTypes(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -685,6 +740,375 @@ func TestWorkflowRun_ProgressEvents(t *testing.T) {
 	require.Equal(t, 0, events[idx].Running)
 	require.Equal(t, 3, events[idx].Completed)
 	require.Equal(t, 3, events[idx].Total)
+}
+
+func TestWorkflowRun_Phase(t *testing.T) {
+	t.Parallel()
+
+	t.Run("stamps subsequent events", func(t *testing.T) {
+		t.Parallel()
+		script := `
+			agent("a")
+			phase("review")
+			agent("b")
+		`
+		var mu sync.Mutex
+		var events []Progress
+		spawn := func(_ context.Context, _ int, _, _ string, _ SpawnOpts) (string, error) {
+			return "ok", nil
+		}
+		_, err := Run(context.Background(), script, spawn, Options{
+			Progress: func(p Progress) {
+				mu.Lock()
+				events = append(events, p)
+				mu.Unlock()
+			},
+		})
+		require.NoError(t, err)
+		require.Len(t, events, 4)
+
+		// Events 0-1 belong to agent "a" (before the phase call).
+		require.Empty(t, events[0].Phase)
+		require.Empty(t, events[1].Phase)
+		// Events 2-3 belong to agent "b" (after phase("review")).
+		require.Equal(t, "review", events[2].Phase)
+		require.Equal(t, "review", events[3].Phase)
+	})
+
+	t.Run("empty name throws", func(t *testing.T) {
+		t.Parallel()
+		script := `
+			local ok, err = pcall(function() phase("") end)
+			if ok then return "fail" end
+			return err
+		`
+		res, err := Run(context.Background(), script, nil, Options{})
+		require.NoError(t, err)
+		require.Contains(t, res.Value, "phase() name cannot be empty")
+	})
+
+	t.Run("number name is coerced like lua tostring", func(t *testing.T) {
+		t.Parallel()
+		// L.CheckString follows Lua semantics and accepts numbers by
+		// coercing them; only non-scalar values raise an error.
+		script := `
+			local ok = pcall(function() phase(42) end)
+			return ok
+		`
+		res, err := Run(context.Background(), script, nil, Options{})
+		require.NoError(t, err)
+		require.JSONEq(t, "true", res.Value)
+	})
+
+	t.Run("re-calling phase switches grouping", func(t *testing.T) {
+		t.Parallel()
+		script := `
+			phase("one")
+			agent("a")
+			phase("two")
+			agent("b")
+		`
+		var phases []string
+		var mu sync.Mutex
+		spawn := func(_ context.Context, _ int, _, prompt string, _ SpawnOpts) (string, error) {
+			return "ok", nil
+		}
+		_, err := Run(context.Background(), script, spawn, Options{
+			Progress: func(p Progress) {
+				mu.Lock()
+				if p.Kind == "agent_start" {
+					phases = append(phases, p.Phase)
+				}
+				mu.Unlock()
+			},
+		})
+		require.NoError(t, err)
+		require.Equal(t, []string{"one", "two"}, phases)
+	})
+}
+
+func TestWorkflowRun_Pipeline(t *testing.T) {
+	t.Parallel()
+
+	t.Run("runs stages per item in order", func(t *testing.T) {
+		t.Parallel()
+		script := `
+			local res = pipeline(
+				{"alpha", "beta"},
+				{
+					{prompt = "scan {{item}}"},
+					{prompt = "summarize {{output}}"}
+				}
+			)
+			return res
+		`
+		var mu sync.Mutex
+		type spawn struct {
+			prompt string
+			stage  int // derived from prompt content below
+		}
+		var order []string
+		spawnFn := func(_ context.Context, _ int, _, prompt string, _ SpawnOpts) (string, error) {
+			mu.Lock()
+			order = append(order, prompt)
+			mu.Unlock()
+			if strings.HasPrefix(prompt, "scan ") {
+				return "scan-result:" + strings.TrimPrefix(prompt, "scan "), nil
+			}
+			return "final", nil
+		}
+		res, err := Run(context.Background(), script, spawnFn, Options{MaxAgents: 10})
+		require.NoError(t, err)
+		require.Equal(t, 4, res.AgentCount)
+
+		var arr []map[string]any
+		require.NoError(t, json.Unmarshal([]byte(res.Value), &arr))
+		require.Len(t, arr, 2)
+
+		require.Equal(t, true, arr[0]["ok"])
+		require.Equal(t, "alpha", arr[0]["item"])
+		require.Equal(t, "final", arr[0]["value"])
+		require.Equal(t, true, arr[1]["ok"])
+		require.Equal(t, "beta", arr[1]["item"])
+
+		// Per-item stage chaining: each item's second-stage prompt must
+		// carry that item's first-stage output.
+		mu.Lock()
+		defer mu.Unlock()
+		require.Contains(t, order, "summarize scan-result:alpha")
+		require.Contains(t, order, "summarize scan-result:beta")
+	})
+
+	t.Run("stage error fails only that item", func(t *testing.T) {
+		t.Parallel()
+		script := `
+			local res = pipeline(
+				{"good", "bad"},
+				{
+					{prompt = "run {{item}}"}
+				}
+			)
+			return res
+		`
+		spawn := func(_ context.Context, _ int, _, prompt string, _ SpawnOpts) (string, error) {
+			if strings.Contains(prompt, "bad") {
+				return "", errors.New("boom")
+			}
+			return "done", nil
+		}
+		res, err := Run(context.Background(), script, spawn, Options{MaxAgents: 5})
+		require.NoError(t, err)
+
+		var arr []map[string]any
+		require.NoError(t, json.Unmarshal([]byte(res.Value), &arr))
+		require.Len(t, arr, 2)
+		require.Equal(t, true, arr[0]["ok"])
+		require.Equal(t, false, arr[1]["ok"])
+		require.Contains(t, arr[1]["error"], "boom")
+	})
+
+	t.Run("items run concurrently", func(t *testing.T) {
+		t.Parallel()
+		script := `
+			local items = {}
+			for i = 1, 4 do items[i] = "i" .. i end
+			pipeline(items, {{prompt = "p {{item}}"}})
+		`
+		var active, maxActive int32
+		spawn := func(_ context.Context, _ int, _, _ string, _ SpawnOpts) (string, error) {
+			v := atomic.AddInt32(&active, 1)
+			for {
+				cur := atomic.LoadInt32(&maxActive)
+				if v <= cur || atomic.CompareAndSwapInt32(&maxActive, cur, v) {
+					break
+				}
+			}
+			time.Sleep(10 * time.Millisecond)
+			atomic.AddInt32(&active, -1)
+			return "ok", nil
+		}
+		res, err := Run(context.Background(), script, spawn, Options{MaxConcurrent: 3, MaxAgents: 10})
+		require.NoError(t, err)
+		require.Equal(t, 4, res.AgentCount)
+		max := int(atomic.LoadInt32(&maxActive))
+		require.LessOrEqual(t, max, 3)
+		require.GreaterOrEqual(t, max, 2, "items must run concurrently")
+	})
+
+	t.Run("validation errors before spawning", func(t *testing.T) {
+		t.Parallel()
+		cases := []struct{ name, script, want string }{
+			{"missing stages", `pipeline({"a"})`, "requires items and stages tables"},
+			{"empty items", `pipeline({}, {{prompt = "x"}})`, "non-empty array of items"},
+			{"empty stages", `pipeline({"a"}, {})`, "non-empty array of stages"},
+			{"named item keys", `pipeline({a = "x"}, {{prompt = "p"}})`, "named keys"},
+			{"named stage keys", `pipeline({"a"}, {{prompt = "p"}, foo = 1})`, "named keys"},
+			{"missing stage prompt", `pipeline({"a"}, {{label = "nope"}})`, "missing a prompt string"},
+			{"invalid model in stage", `pipeline({"a"}, {{prompt = "p", model = "huge"}})`, "invalid model"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				script := `
+					local ok = pcall(function()
+						` + tc.script + `
+					end)
+					return ok
+				`
+				var called atomic.Bool
+				spawn := func(_ context.Context, _ int, _, _ string, _ SpawnOpts) (string, error) {
+					called.Store(true)
+					return "ok", nil
+				}
+				res, err := Run(context.Background(), script, spawn, Options{})
+				require.NoError(t, err)
+				require.JSONEq(t, "false", res.Value,
+					"malformed pipeline() must raise a Lua error")
+				require.False(t, called.Load(), "no agent may spawn for a malformed pipeline()")
+			})
+		}
+	})
+
+	t.Run("respects agent cap across all stages", func(t *testing.T) {
+		t.Parallel()
+		script := `
+			local items = {}
+			for i = 1, 5 do items[i] = "i" .. i end
+			local ok, err = pcall(function()
+				pipeline(items, {{prompt = "s1 {{item}}"}, {prompt = "s2 {{output}}"}})
+			end)
+			if ok then return "fail" end
+			return err
+		`
+		res, err := Run(context.Background(), script,
+			func(context.Context, int, string, string, SpawnOpts) (string, error) { return "ok", nil },
+			Options{MaxAgents: 6},
+		)
+		require.NoError(t, err)
+		require.Contains(t, res.Value, "limit (6) reached")
+	})
+
+	t.Run("releases semaphore between stages", func(t *testing.T) {
+		t.Parallel()
+		script := `
+			local res = pipeline(
+				{"item1"},
+				{
+					{prompt = "s1 {{item}}"},
+					{prompt = "s2 {{output}}"}
+				}
+			)
+			return res
+		`
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		res, err := Run(ctx, script,
+			func(context.Context, int, string, string, SpawnOpts) (string, error) { return "ok", nil },
+			Options{MaxConcurrent: 1, Timeout: 2 * time.Second},
+		)
+		require.NoError(t, err)
+		require.Equal(t, 2, res.AgentCount)
+	})
+}
+
+func TestWorkflowRun_SchemaValidation(t *testing.T) {
+	t.Parallel()
+
+	schema := `{type = "object", properties = {name = {type = "string"}}, required = {"name"}, additionalProperties = false}`
+
+	t.Run("agent() valid output passes", func(t *testing.T) {
+		t.Parallel()
+		script := `
+			local r = agent("who", {json = true, schema = ` + schema + `})
+			return r.name
+		`
+		spawn := func(_ context.Context, _ int, _, _ string, _ SpawnOpts) (string, error) {
+			return `{"name": "crush"}`, nil
+		}
+		res, err := Run(context.Background(), script, spawn, Options{})
+		require.NoError(t, err)
+		require.JSONEq(t, `"crush"`, res.Value)
+	})
+
+	t.Run("agent() invalid output raises with message", func(t *testing.T) {
+		t.Parallel()
+		script := `
+			local ok, err = pcall(function()
+				agent("who", {json = true, schema = ` + schema + `})
+			end)
+			if ok then return "fail" end
+			return err
+		`
+		spawn := func(_ context.Context, _ int, _, _ string, _ SpawnOpts) (string, error) {
+			return `{"wrong": "field"}`, nil
+		}
+		res, err := Run(context.Background(), script, spawn, Options{})
+		require.NoError(t, err)
+		require.Contains(t, res.Value, "schema validation failed")
+	})
+
+	t.Run("agent() non-JSON output under schema errors", func(t *testing.T) {
+		t.Parallel()
+		script := `
+			local ok, err = pcall(function()
+				agent("who", {schema = ` + schema + `})
+			end)
+			if ok then return "fail" end
+			return err
+		`
+		spawn := func(_ context.Context, _ int, _, _ string, _ SpawnOpts) (string, error) {
+			return "plain text, no json", nil
+		}
+		res, err := Run(context.Background(), script, spawn, Options{})
+		require.NoError(t, err)
+		require.Contains(t, res.Value, "schema validation failed")
+	})
+
+	t.Run("parallel() schema failure lands in entry error", func(t *testing.T) {
+		t.Parallel()
+		script := `
+			local res = parallel({
+				{prompt = "a", json = true, schema = ` + schema + `},
+				{prompt = "b", json = true, schema = ` + schema + `}
+			})
+			return res
+		`
+		spawn := func(_ context.Context, _ int, _, prompt string, _ SpawnOpts) (string, error) {
+			if prompt == "a" {
+				return `{"name": "ok"}`, nil
+			}
+			return `{"name": 42}`, nil
+		}
+		res, err := Run(context.Background(), script, spawn, Options{})
+		require.NoError(t, err)
+
+		var arr []map[string]any
+		require.NoError(t, json.Unmarshal([]byte(res.Value), &arr))
+		require.Len(t, arr, 2)
+		require.Equal(t, true, arr[0]["ok"])
+		require.Equal(t, false, arr[1]["ok"])
+		require.Contains(t, arr[1]["error"], "schema validation failed")
+	})
+
+	t.Run("unknown type keyword rejects documents", func(t *testing.T) {
+		t.Parallel()
+		// kaptinlin compiles unknown type values without error but then
+		// matches no document, so the schema acts as "always invalid"
+		// rather than a compile-time failure.
+		script := `
+			local ok, err = pcall(function()
+				agent("who", {json = true, schema = {type = "not-a-real-type"}})
+			end)
+			if ok then return "fail" end
+			return err
+		`
+		spawn := func(_ context.Context, _ int, _, _ string, _ SpawnOpts) (string, error) {
+			return `{"a": 1}`, nil
+		}
+		res, err := Run(context.Background(), script, spawn, Options{})
+		require.NoError(t, err)
+		require.Contains(t, res.Value, "schema validation failed")
+	})
 }
 
 func TestWorkflowRun_CancelParentContext(t *testing.T) {

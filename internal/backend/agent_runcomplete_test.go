@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/proto"
+	"github.com/charmbracelet/crush/internal/session"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -51,6 +52,10 @@ func (c *errorCoordinator) GenerateTitle(context.Context, string, string)     {}
 
 func (c *errorCoordinator) SideQuestion(context.Context, string, string, []agent.SideQuestionExchange) (agent.SideQuestionResult, error) {
 	return agent.SideQuestionResult{}, nil
+}
+
+func (c *errorCoordinator) ForkSession(context.Context, string, string, string) (session.Session, error) {
+	return session.Session{}, nil
 }
 
 // insertRunCompleteWorkspace installs a workspace backed by a real

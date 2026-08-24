@@ -97,6 +97,7 @@ type (
 		ClientID    string
 		Arguments   []commands.Argument
 		Args        map[string]string // Actual argument values
+		Body        string            // Trailing text after the command name
 	}
 	// ActionRenameSession is a message to rename the current session.
 	ActionRenameSession struct{}
@@ -118,6 +119,17 @@ type (
 	ActionSelectRevertMessage struct {
 		MessageID      string
 		MessageContent string
+	}
+	// ActionForkAtMessage is returned by the branch picker when the user
+	// picks a fork point. The UI should fork the session at that message
+	// (keeping the original intact) and switch to the new fork.
+	ActionForkAtMessage struct {
+		MessageID string
+	}
+	// ActionShowForks is returned by the sessions dialog when the user asks
+	// for the branches of a session. The UI should list its forks.
+	ActionShowForks struct {
+		OriginSessionID string
 	}
 	// ActionKillJob is a message to kill a background job.
 	ActionKillJob struct {

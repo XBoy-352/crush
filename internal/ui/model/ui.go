@@ -195,6 +195,22 @@ type (
 		sessionID string
 		messages  []message.Message
 	}
+	// forkCreatedMsg carries the newly created fork session back from the
+	// off-thread ForkSession call.
+	forkCreatedMsg struct {
+		fork session.Session
+	}
+	// branchPickerLoadedMsg carries the session messages loaded off the
+	// Update loop for the fork-point picker.
+	branchPickerLoadedMsg struct {
+		sessionID string
+		messages  []message.Message
+	}
+	// forksLoadedMsg carries a session's fork list loaded off the Update loop.
+	forksLoadedMsg struct {
+		originID string
+		forks    []session.Session
+	}
 )
 
 // UI represents the main user interface model.
@@ -1484,6 +1500,43 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break
 		}
 		m.dialog.OpenDialog(dialog.NewRevertPicker(m.com, userMessages))
+	case subagentsLoadedMsg:
+		// Children were loaded off the Update loop; build and open the panel
+		// here (no IO). Ignore if the user switched sessions while loading.
+		if !m.hasSession() || msg.sessionID != m.session.ID {
+			break
+		}
+		panel := dialog.NewSubagents(m.com, msg.sessionID, m.com.Workspace.ListChildren)
+		for _, child := range msg.children {
+			panel.HandleLifecycle(&notify.SubAgentLifecycle{
+				ParentSessionID: msg.sessionID,
+				SubSessionID:    child.ID,
+				Title:           child.Title,
+				Phase:           "done",
+			})
+			if row := panel.Rows()[len(panel.Rows())-1]; row != nil {
+				row.Cost = child.Cost
+				row.StartedAt = time.Unix(child.CreatedAt, 0)
+			}
+		}
+		m.dialog.OpenDialog(panel)
+	case branchPickerLoadedMsg:
+		// Messages were loaded off the Update loop; build and open the
+		// picker here (no IO). Ignore if the user switched sessions.
+		if !m.hasSession() || msg.sessionID != m.session.ID {
+			break
+		}
+		var userMessages []message.Message
+		for i := len(msg.messages) - 1; i >= 0; i-- {
+			if msg.messages[i].Role == message.User {
+				userMessages = append(userMessages, msg.messages[i])
+			}
+		}
+		if len(userMessages) == 0 {
+			cmds = append(cmds, util.ReportWarn("No user messages to fork from"))
+			break
+		}
+		m.dialog.OpenDialog(dialog.NewBranchPicker(m.com, userMessages))
 	case util.InfoMsg:
 		if msg.Type == util.InfoTypeError {
 			slog.Error("Error reported", "error", msg.Msg)
@@ -2322,7 +2375,7 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		m.dialog.CloseFrontDialog()
 		cmds = append(cmds, m.attachSkill(msg.ID, msg.Name))
 	case dialog.ActionRunMCPPrompt:
-		if len(msg.Arguments) > 0 && msg.Args == nil {
+		if hasRequiredArgs(msg.Arguments) && msg.Args == nil {
 			m.dialog.CloseFrontDialog()
 			title := cmp.Or(msg.Title, "MCP Prompt Arguments")
 			argsDialog := dialog.NewArguments(
@@ -2335,7 +2388,7 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			m.dialog.OpenDialog(argsDialog)
 			break
 		}
-		cmds = append(cmds, m.runMCPPrompt(msg.ClientID, msg.PromptID, msg.Args))
+		cmds = append(cmds, m.runMCPPrompt(msg.ClientID, msg.PromptID, msg.Args, msg.Body))
 	case dialog.ActionRevertToMessage:
 		if m.isAgentBusy() {
 			cmds = append(cmds, util.ReportWarn("Agent is busy, please wait..."))
@@ -2352,6 +2405,52 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		// revert scope dialog next.
 		m.dialog.CloseDialog(dialog.RevertPickerID)
 		m.dialog.OpenDialog(dialog.NewRevert(m.com, msg.MessageID, msg.MessageContent))
+
+	case dialog.ActionForkAtMessage:
+		// User picked a fork point — fork off-thread (flush + SQL copy is
+		// an HTTP round-trip in client/server mode) and switch to the fork.
+		m.dialog.CloseDialog(dialog.BranchPickerID)
+		originID := ""
+		if m.hasSession() {
+			originID = m.session.ID
+		}
+		if originID == "" {
+			break
+		}
+		checkpointID := msg.MessageID
+		cmds = append(cmds, func() tea.Msg {
+			fork, err := m.com.Workspace.ForkSession(context.Background(), originID, checkpointID, "")
+			if err != nil {
+				return util.NewErrorMsg(err)
+			}
+			return forkCreatedMsg{fork: fork}
+		})
+
+	case forkCreatedMsg:
+		cmds = append(cmds, m.loadSession(msg.fork.ID))
+		cmds = append(cmds, util.CmdHandler(util.NewInfoMsg("Forked session: "+msg.fork.Title)))
+
+	case dialog.ActionShowForks:
+		cmds = append(cmds, m.listForksFor(msg.OriginSessionID))
+
+	case forksLoadedMsg:
+		if len(msg.forks) == 0 {
+			cmds = append(cmds, util.ReportWarn("No branches for this session"))
+			break
+		}
+		panel := dialog.NewSubagents(m.com, msg.originID, nil)
+		for _, fork := range msg.forks {
+			panel.HandleLifecycle(&notify.SubAgentLifecycle{
+				ParentSessionID: msg.originID,
+				SubSessionID:    fork.ID,
+				Title:           fork.Title + " (branch)",
+				Phase:           "done",
+			})
+			if row := panel.Rows()[len(panel.Rows())-1]; row != nil {
+				row.Cost = fork.Cost
+			}
+		}
+		m.dialog.OpenDialog(panel)
 
 	// ActionKillJob kills a background shell job. The registry lives in
 	// the agent process, so this is an HTTP round-trip in client/server
@@ -2939,6 +3038,16 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 
 				m.randomizePlaceholders()
 				m.historyReset()
+
+				// Slash-command support: "/command-name <text>" resolves a
+				// matching MCP prompt or custom command and sends the trailing
+				// text as the message body with the command's instructions
+				// prepended, instead of sending "/command-name ..." literally.
+				// Unknown commands fall through to a normal send so plain text
+				// starting with "/" still works.
+				if cmd := m.handleSlashCommand(value, attachments); cmd != nil {
+					return tea.Batch(cmd, m.loadPromptHistory())
+				}
 
 				return tea.Batch(m.sendMessage(value, attachments...), m.loadPromptHistory())
 			case key.Matches(msg, m.keyMap.Chat.NewSession):
@@ -4790,6 +4899,14 @@ func (m *UI) openDialog(id string) tea.Cmd {
 		if cmd := m.openWorkflowPopupDialog(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+	case dialog.SubagentsID:
+		if cmd := m.openSubagentsDialog(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	case dialog.BranchPickerID:
+		if cmd := m.openBranchPickerDialog(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	default:
 		// Unknown dialog
 		break
@@ -4809,6 +4926,70 @@ func (m *UI) openWorkflowPopupDialog() tea.Cmd {
 		m.dialog.BringToFront(m.workflowPopup.ID())
 	}
 	return nil
+}
+
+// subagentsLoadedMsg carries the persisted child sessions fetched off the
+// Update loop; the picker is built when it arrives.
+type subagentsLoadedMsg struct {
+	sessionID string
+	children  []session.Session
+}
+
+// openSubagentsDialog opens the subagents panel for the current session,
+// seeding it from ListChildren (fetched off-loop like the revert picker).
+func (m *UI) openSubagentsDialog() tea.Cmd {
+	if m.dialog.ContainsDialog(dialog.SubagentsID) {
+		m.dialog.BringToFront(dialog.SubagentsID)
+		return nil
+	}
+	if !m.hasSession() {
+		return util.ReportWarn("No active session")
+	}
+	sessionID := m.session.ID
+	return func() tea.Msg {
+		ctx := context.Background()
+		children, err := m.com.Workspace.ListChildren(ctx, sessionID)
+		if err != nil {
+			return util.ReportError(err)()
+		}
+		return subagentsLoadedMsg{sessionID: sessionID, children: children}
+	}
+}
+
+// listForksFor fetches a session's forks off the Update loop; the panel is
+// built when forksLoadedMsg comes back.
+func (m *UI) listForksFor(originID string) tea.Cmd {
+	return func() tea.Msg {
+		forks, err := m.com.Workspace.ListForks(context.Background(), originID)
+		if err != nil {
+			return util.ReportError(err)()
+		}
+		return forksLoadedMsg{originID: originID, forks: forks}
+	}
+}
+
+// openBranchPickerDialog opens the fork-point picker for the current
+// session. Messages are fetched off the Update loop; the picker is built
+// when branchPickerLoadedMsg comes back.
+func (m *UI) openBranchPickerDialog() tea.Cmd {
+	if m.dialog.ContainsDialog(dialog.BranchPickerID) {
+		m.dialog.BringToFront(dialog.BranchPickerID)
+		return nil
+	}
+	if !m.hasSession() {
+		return util.ReportWarn("No active session")
+	}
+	if m.isAgentBusy() {
+		return util.ReportWarn("Agent is busy, please wait before forking")
+	}
+	sessionID := m.session.ID
+	return func() tea.Msg {
+		msgs, err := m.com.Workspace.ListMessages(context.Background(), sessionID)
+		if err != nil {
+			return util.ReportError(err)()
+		}
+		return branchPickerLoadedMsg{sessionID: sessionID, messages: msgs}
+	}
 }
 
 // openBtwDialog opens the ephemeral side-question dialog.
@@ -5205,6 +5386,8 @@ func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
 		return m.handleReAuthenticate(n.ProviderID)
 	case notify.TypeWorkflowProgress:
 		return m.handleWorkflowProgress(n.WorkflowProgress)
+	case notify.TypeSubAgentLifecycle:
+		return m.handleSubAgentLifecycle(n.SubAgentLifecycle)
 	case notify.TypeSideQuestionProgress:
 		return m.handleSideQuestionProgress(n.Message)
 	case notify.TypeAWSSSOAuth:
@@ -5267,6 +5450,23 @@ func (m *UI) handleSideQuestionProgress(text string) tea.Cmd {
 		if btw, ok := dia.(*dialog.Btw); ok {
 			btw.HandleProgress(text)
 		}
+	}
+	return nil
+}
+
+// handleSubAgentLifecycle forwards a subagent start/done/error event to the
+// subagents panel. Events for a closed panel are dropped; the panel
+// reconstructs durable state from ListChildren when opened.
+func (m *UI) handleSubAgentLifecycle(ev *notify.SubAgentLifecycle) tea.Cmd {
+	if ev == nil {
+		return nil
+	}
+	dia := m.dialog.Dialog(dialog.SubagentsID)
+	if dia == nil {
+		return nil
+	}
+	if sub, ok := dia.(*dialog.Subagents); ok {
+		sub.HandleLifecycle(ev)
 	}
 	return nil
 }
@@ -5801,7 +6001,19 @@ func (m *UI) drawSessionDetails(scr uv.Screen, area uv.Rectangle) {
 	).Draw(scr, area)
 }
 
-func (m *UI) runMCPPrompt(clientID, promptID string, arguments map[string]string) tea.Cmd {
+// hasRequiredArgs reports whether any argument is required. MCP prompts whose
+// arguments are all optional (e.g. ponytail's mode) run directly with defaults
+// instead of forcing an arguments dialog.
+func hasRequiredArgs(args []commands.Argument) bool {
+	for _, a := range args {
+		if a.Required {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *UI) runMCPPrompt(clientID, promptID string, arguments map[string]string, body string) tea.Cmd {
 	load := func() tea.Msg {
 		prompt, err := m.com.Workspace.GetMCPPrompt(clientID, promptID, arguments)
 		if err != nil {
@@ -5812,8 +6024,12 @@ func (m *UI) runMCPPrompt(clientID, promptID string, arguments map[string]string
 		if prompt == "" {
 			return nil
 		}
+		content := prompt
+		if body != "" {
+			content = prompt + "\n\n" + body
+		}
 		return sendMessageMsg{
-			Content: prompt,
+			Content: content,
 		}
 	}
 
@@ -5826,6 +6042,72 @@ func (m *UI) runMCPPrompt(clientID, promptID string, arguments map[string]string
 	})
 
 	return tea.Sequence(cmds...)
+}
+
+// handleSlashCommand resolves a "/command-name <text>" input against the
+// loaded MCP prompts and custom commands. When it matches an MCP prompt it
+// fetches the prompt's instructions (with default args, no args dialog) and
+// returns a command that sends the trailing text as the user message with the
+// instructions prepended. A matching custom command substitutes its content
+// and arguments. Returns nil when there is no match so the caller falls
+// through to a normal send.
+func (m *UI) handleSlashCommand(value string, attachments []message.Attachment) tea.Cmd {
+	trimmed := strings.TrimSpace(value)
+	if !strings.HasPrefix(trimmed, "/") {
+		return nil
+	}
+	rest := strings.TrimPrefix(trimmed, "/")
+	name, body, _ := strings.Cut(rest, " ")
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	body = strings.TrimSpace(body)
+
+	// Match MCP prompts by name or ID.
+	for _, p := range m.mcpPrompts {
+		if p.PromptID != name && p.ID != name {
+			continue
+		}
+		// Fetch the prompt with default args (no args dialog) and send the
+		// body as the message with the instructions prepended.
+		load := func() tea.Msg {
+			prompt, err := m.com.Workspace.GetMCPPrompt(p.ClientID, p.PromptID, nil)
+			if err != nil {
+				return util.ReportError(err)()
+			}
+			if prompt == "" {
+				return nil
+			}
+			content := prompt
+			if body != "" {
+				content = prompt + "\n\n" + body
+			}
+			return sendMessageMsg{Content: content, Attachments: attachments}
+		}
+		return tea.Batch(load)
+	}
+
+	// Match custom commands by name or ID.
+	for _, c := range m.customCommands {
+		if c.Name != name && c.ID != name {
+			continue
+		}
+		if c.Skill != nil {
+			return m.attachSkill(c.Skill.SkillFilePath, c.Skill.Name)
+		}
+		content := c.Content
+		if body != "" {
+			content = c.Content + "\n\n" + body
+		}
+		// Defer to the sendMessageMsg handler so session creation and agent
+		// submission happen on the tea runtime, not during input handling.
+		return func() tea.Msg {
+			return sendMessageMsg{Content: content, Attachments: attachments}
+		}
+	}
+
+	return nil
 }
 
 func (m *UI) handleStateChanged() tea.Cmd {

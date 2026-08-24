@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/crush/internal/backend"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/proto"
+	"github.com/charmbracelet/crush/internal/session"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -85,6 +86,10 @@ func (s *runCoordinator) GenerateTitle(context.Context, string, string) {}
 
 func (s *runCoordinator) SideQuestion(context.Context, string, string, []agent.SideQuestionExchange) (agent.SideQuestionResult, error) {
 	return agent.SideQuestionResult{}, nil
+}
+
+func (s *runCoordinator) ForkSession(context.Context, string, string, string) (session.Session, error) {
+	return session.Session{}, nil
 }
 
 func (s *runCoordinator) capturedCtx() context.Context {

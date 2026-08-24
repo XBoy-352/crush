@@ -2,12 +2,17 @@ package backend
 
 import (
 	"context"
+	"errors"
 
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/shell"
 )
+
+// errAgentNotInitialized mirrors workspace.ErrAgentNotInitialized without
+// importing the workspace package (which would create a cycle).
+var errAgentNotInitialized = errors.New("coder agent is not initialized")
 
 // CreateSession creates a new session in the given workspace.
 func (b *Backend) CreateSession(ctx context.Context, workspaceID, title string) (session.Session, error) {
@@ -37,6 +42,40 @@ func (b *Backend) ListSessions(ctx context.Context, workspaceID string) ([]sessi
 	}
 
 	return ws.Sessions.List(ctx)
+}
+
+// ListSessionChildren returns the direct child (subagent) sessions of the
+// given session, oldest first.
+func (b *Backend) ListSessionChildren(ctx context.Context, workspaceID, sessionID string) ([]session.Session, error) {
+	ws, err := b.GetWorkspace(workspaceID)
+	if err != nil {
+		return nil, err
+	}
+
+	return ws.Sessions.ListChildren(ctx, sessionID)
+}
+
+// ListSessionForks returns sessions forked from originSessionID, oldest first.
+func (b *Backend) ListSessionForks(ctx context.Context, workspaceID, originSessionID string) ([]session.Session, error) {
+	ws, err := b.GetWorkspace(workspaceID)
+	if err != nil {
+		return nil, err
+	}
+
+	return ws.Sessions.ListForks(ctx, originSessionID)
+}
+
+// ForkSession flushes pending message writes and forks the session at the
+// given checkpoint message into a new root session.
+func (b *Backend) ForkSession(ctx context.Context, workspaceID, originSessionID, checkpointMessageID, newTitle string) (session.Session, error) {
+	ws, err := b.GetWorkspace(workspaceID)
+	if err != nil {
+		return session.Session{}, err
+	}
+	if ws.AgentCoordinator == nil {
+		return session.Session{}, errAgentNotInitialized
+	}
+	return ws.AgentCoordinator.ForkSession(ctx, originSessionID, checkpointMessageID, newTitle)
 }
 
 // GetAgentSession returns session metadata with the agent's busy

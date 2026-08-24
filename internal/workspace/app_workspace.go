@@ -57,6 +57,26 @@ func (w *AppWorkspace) ListSessions(ctx context.Context) ([]session.Session, err
 	return w.app.Sessions.List(ctx)
 }
 
+func (w *AppWorkspace) ListChildren(ctx context.Context, sessionID string) ([]session.Session, error) {
+	return w.app.Sessions.ListChildren(ctx, sessionID)
+}
+
+func (w *AppWorkspace) ListForks(ctx context.Context, originSessionID string) ([]session.Session, error) {
+	return w.app.Sessions.ListForks(ctx, originSessionID)
+}
+
+// ForkSession flushes the debounced message pipeline (so buffered messages
+// are visible to the copy) and then forks via the session service.
+func (w *AppWorkspace) ForkSession(ctx context.Context, originSessionID, checkpointMessageID, newTitle string) (session.Session, error) {
+	if err := w.app.Messages.FlushAll(ctx); err != nil {
+		return session.Session{}, err
+	}
+	if newTitle == "" {
+		newTitle = "Fork of " + time.Now().Format("Jan 2 15:04")
+	}
+	return w.app.Sessions.ForkSession(ctx, originSessionID, checkpointMessageID, newTitle)
+}
+
 func (w *AppWorkspace) SaveSession(ctx context.Context, sess session.Session) (session.Session, error) {
 	return w.app.Sessions.Save(ctx, sess)
 }

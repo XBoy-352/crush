@@ -699,6 +699,63 @@ func (c *Client) ListSessions(ctx context.Context, id string) ([]proto.Session, 
 	return sessions, nil
 }
 
+// ListSessionChildren lists a session's direct child (subagent) sessions
+// as proto types.
+func (c *Client) ListSessionChildren(ctx context.Context, id, sessionID string) ([]proto.Session, error) {
+	rsp, err := c.get(ctx, fmt.Sprintf("/workspaces/%s/sessions/%s/children", id, sessionID), nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get session children: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to get session children: status code %d", rsp.StatusCode)
+	}
+	var sessions []proto.Session
+	if err := json.NewDecoder(rsp.Body).Decode(&sessions); err != nil {
+		return nil, fmt.Errorf("failed to decode sessions: %w", err)
+	}
+	return sessions, nil
+}
+
+// ListForks lists a session's forks as proto types.
+func (c *Client) ListForks(ctx context.Context, id, originSessionID string) ([]proto.Session, error) {
+	rsp, err := c.get(ctx, fmt.Sprintf("/workspaces/%s/sessions/%s/forks", id, originSessionID), nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get session forks: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to get session forks: status code %d", rsp.StatusCode)
+	}
+	var sessions []proto.Session
+	if err := json.NewDecoder(rsp.Body).Decode(&sessions); err != nil {
+		return nil, fmt.Errorf("failed to decode sessions: %w", err)
+	}
+	return sessions, nil
+}
+
+// ForkSession forks a session at a checkpoint message via the server and
+// returns the new root session.
+func (c *Client) ForkSession(ctx context.Context, id, originSessionID, checkpointMessageID, title string) (*proto.Session, error) {
+	body := proto.ForkSessionRequest{
+		CheckpointMessageID: checkpointMessageID,
+		Title:               title,
+	}
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/sessions/%s/fork", id, originSessionID), nil, jsonBody(body), http.Header{"Content-Type": []string{"application/json"}})
+	if err != nil {
+		return nil, fmt.Errorf("failed to fork session: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to fork session: status code %d", rsp.StatusCode)
+	}
+	var sess proto.Session
+	if err := json.NewDecoder(rsp.Body).Decode(&sess); err != nil {
+		return nil, fmt.Errorf("failed to decode session: %w", err)
+	}
+	return &sess, nil
+}
+
 // GrantPermission grants a permission on a workspace. The returned
 // bool reports whether this call resolved the pending request (true)
 // or found it already resolved by a previous caller (false). A false

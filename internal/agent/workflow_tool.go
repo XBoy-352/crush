@@ -36,6 +36,8 @@ const (
 type WorkflowParams struct {
 	Description string `json:"description" description:"One-line summary of what this workflow does; shown in the permission prompt"`
 	Script      string `json:"script" description:"Lua orchestration script; see tool description for the API"`
+	// Args are exposed to the script as the `args` global table.
+	Args map[string]string `json:"args,omitempty" description:"Optional key/value pairs exposed to the script as the args table"`
 }
 
 // workflowAgentKey identifies one sub-agent variant: a profile ("task" or
@@ -280,12 +282,14 @@ func (c *coordinator) workflowTool(ctx context.Context) (fantasy.AgentTool, erro
 						Running:    p.Running,
 						Completed:  p.Completed,
 						Total:      p.Total,
+						Phase:      p.Phase,
 					},
 				})
 			}
 
 			result, err := workflow.Run(ctx, params.Script, spawn, workflow.Options{
 				Progress: progressFn,
+				Args:     params.Args,
 			})
 			if err != nil {
 				if ctx.Err() != nil {

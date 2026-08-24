@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/kaptinlin/jsonschema"
 	lua "github.com/yuin/gopher-lua"
 )
 
@@ -45,6 +46,39 @@ type SpawnOpts struct {
 	Agent string // "task", "coder", or "" (defaults to "task").
 }
 
+// Schema wraps a compiled JSON schema used to validate an agent's JSON
+// output. It is created by parseSchemaOpt from a `schema` option table.
+type Schema struct {
+	compiled *jsonschema.Schema
+}
+
+// parseSchemaOpt extracts the optional `schema` field (a Lua table holding a
+// JSON-schema-shaped table) from spawn options and compiles it. Returns nil
+// when no schema is set; raises a Lua error when it cannot be compiled.
+func parseSchemaOpt(L *lua.LState, t *lua.LTable, funcName string) *Schema {
+	v := t.RawGetString("schema")
+	if v == lua.LNil {
+		return nil
+	}
+	schemaT, ok := v.(*lua.LTable)
+	if !ok {
+		L.RaiseError("%s schema option must be a table", funcName)
+	}
+	goSchema, err := luaToGo(schemaT, make(map[*lua.LTable]bool), 0)
+	if err != nil {
+		L.RaiseError("%s invalid schema: %s", funcName, err.Error())
+	}
+	raw, err := json.Marshal(goSchema)
+	if err != nil {
+		L.RaiseError("%s could not encode schema: %s", funcName, err.Error())
+	}
+	compiled, err := jsonschema.NewCompiler().Compile(raw)
+	if err != nil {
+		L.RaiseError("%s invalid JSON schema: %s", funcName, err.Error())
+	}
+	return &Schema{compiled: compiled}
+}
+
 // SpawnFunc runs one subagent. index is the global 0-based agent index
 // (unique per workflow run, used for synthetic tool-call IDs), label an
 // optional display title, prompt the task. Returns the agent's final text.
@@ -64,6 +98,7 @@ type Progress struct {
 	Running   int    // agents currently executing
 	Completed int    // agents finished (success or error)
 	Total     int    // agents started so far
+	Phase     string // current phase set by phase(), "" until then
 }
 
 // Progress has a monotonic Seq so out-of-order delivery cannot rewind
@@ -75,6 +110,9 @@ type Options struct {
 	MaxAgents     int
 	Timeout       time.Duration
 	Progress      ProgressFunc
+	// Args is exposed to the script as the global `args` table so a
+	// workflow can be parameterized without editing its source. May be nil.
+	Args map[string]string
 }
 
 // Result is the outcome of a workflow run.
@@ -95,6 +133,7 @@ type runState struct {
 	runningCount   int
 	completedCount int
 	seq            int64
+	phase          string
 
 	sem chan struct{}
 }
@@ -140,6 +179,7 @@ func (st *runState) progress(kind string, idx int, label, msg string) {
 		Running:   st.runningCount,
 		Completed: st.completedCount,
 		Total:     st.agentIndex,
+		Phase:     st.phase,
 	}
 	st.mu.Unlock()
 	if st.opts.Progress != nil {
@@ -162,6 +202,31 @@ func (st *runState) addLog(msg string) {
 	st.logs = append(st.logs, msg)
 	st.mu.Unlock()
 	st.progress("log", -1, "", msg)
+}
+
+// spawnWithSchema runs one subagent and, when schema is non-nil and the raw
+// reply carries a JSON value, validates it against the schema. A validation
+// failure is returned as an error so callers report it like any spawn error.
+// Without a schema it returns the raw text untouched.
+func (st *runState) spawnWithSchema(ctx context.Context, index int, label, prompt string, opts SpawnOpts, schema *Schema) (string, error) {
+	text, err := st.spawn(ctx, index, label, prompt, opts)
+	if err != nil || schema == nil {
+		return text, err
+	}
+	jsTxt, extractErr := extractJSON(text)
+	if extractErr != nil {
+		return "", fmt.Errorf("schema validation failed: %w", extractErr)
+	}
+	result := schema.compiled.ValidateJSON([]byte(jsTxt))
+	if !result.IsValid() {
+		var msgs []string
+		for _, e := range result.Errors {
+			msgs = append(msgs, e.Error())
+		}
+		slices.Sort(msgs)
+		return "", fmt.Errorf("schema validation failed: %s", strings.Join(msgs, "; "))
+	}
+	return text, nil
 }
 
 // truncateUTF8 caps s at limit bytes without splitting a rune. Slicing a
@@ -220,9 +285,19 @@ func Run(ctx context.Context, script string, spawn SpawnFunc, opts Options) (Res
 		sem:   make(chan struct{}, opts.MaxConcurrent),
 	}
 
+	if len(opts.Args) > 0 {
+		args := L.NewTable()
+		for k, v := range opts.Args {
+			args.RawSetString(k, lua.LString(v))
+		}
+		L.SetGlobal("args", args)
+	}
+
 	registerAgent(L, st)
 	registerParallel(L, st)
 	registerLog(L, st)
+	registerPhase(L, st)
+	registerPipeline(L, st)
 
 	// Wrap so bare `return` works. The comment keeps script line numbers
 	// aligned (wrapper line 1 maps to script line 1 after offset strip).
@@ -360,6 +435,7 @@ func registerAgent(L *lua.LState, st *runState) {
 		var label string
 		var spawnOpts SpawnOpts
 		isJSON := false
+		var schema *Schema
 		if L.GetTop() > 1 {
 			opts := L.Get(2)
 			if t, ok := opts.(*lua.LTable); ok {
@@ -369,6 +445,7 @@ func registerAgent(L *lua.LState, st *runState) {
 				if j := t.RawGetString("json"); j != lua.LNil {
 					isJSON = lua.LVAsBool(j)
 				}
+				schema = parseSchemaOpt(L, t, "agent()")
 				spawnOpts = parseSpawnOpts(L, t)
 			}
 		}
@@ -387,7 +464,7 @@ func registerAgent(L *lua.LState, st *runState) {
 
 		st.progress("agent_start", idx, label, "")
 
-		text, err := st.spawn(st.ctx, idx, label, prompt, spawnOpts)
+		text, err := st.spawnWithSchema(st.ctx, idx, label, prompt, spawnOpts, schema)
 		if err != nil {
 			st.progress("agent_error", idx, label, err.Error())
 			L.RaiseError("%s", err.Error())
@@ -460,6 +537,7 @@ func registerParallel(L *lua.LState, st *runState) {
 			label     string
 			isJSON    bool
 			spawnOpts SpawnOpts
+			schema    *Schema
 		}
 		parsed := make([]parsedCall, len(calls))
 		hasCoder := false
@@ -490,6 +568,7 @@ func registerParallel(L *lua.LState, st *runState) {
 				label:     label,
 				isJSON:    isJSON,
 				spawnOpts: so,
+				schema:    parseSchemaOpt(L, m, "parallel()"),
 			}
 		}
 
@@ -548,7 +627,7 @@ func registerParallel(L *lua.LState, st *runState) {
 
 				st.progress("agent_start", pc.index, pc.label, "")
 
-				text, err := st.spawn(st.ctx, pc.index, pc.label, pc.prompt, pc.spawnOpts)
+				text, err := st.spawnWithSchema(st.ctx, pc.index, pc.label, pc.prompt, pc.spawnOpts, pc.schema)
 				if err != nil {
 					st.progress("agent_error", pc.index, pc.label, err.Error())
 				} else {
@@ -602,6 +681,197 @@ func registerLog(L *lua.LState, st *runState) {
 			st.addLog(lua.LVAsString(L.Get(1)))
 		}
 		return 0
+	}))
+}
+
+// registerPhase adds the phase() builtin: a display-only marker that groups
+// subsequent agents in progress consumers (e.g. the workflow popup header).
+func registerPhase(L *lua.LState, st *runState) {
+	L.SetGlobal("phase", L.NewFunction(func(L *lua.LState) int {
+		name := L.CheckString(1)
+		if name == "" {
+			L.RaiseError("phase() name cannot be empty")
+		}
+		st.mu.Lock()
+		st.phase = name
+		st.mu.Unlock()
+		return 0
+	}))
+}
+
+// registerPipeline adds the pipeline(items, stages) builtin.
+//
+// ponytail: stage output is string-typed (the raw agent reply), there is no
+// barrier or cross-item dependency support, and stages are plain spec tables
+// rather than Lua callbacks -- gopher-lua's agent() blocks the VM, so a
+// subagent can never call back into the script to run a stage function. The
+// upgrade path if richer staging is ever needed is a native Go orchestrator,
+// not more Lua machinery.
+func registerPipeline(L *lua.LState, st *runState) {
+	L.SetGlobal("pipeline", L.NewFunction(func(L *lua.LState) int {
+		if L.GetTop() < 2 {
+			L.RaiseError("pipeline() requires items and stages tables")
+		}
+		itemsT := L.CheckTable(1)
+		stagesT := L.CheckTable(2)
+
+		items, err := tableToSlice(itemsT)
+		if err != nil {
+			L.RaiseError("pipeline() items: %s", err.Error())
+		}
+		keyCount := 0
+		itemsT.ForEach(func(_, _ lua.LValue) { keyCount++ })
+		if keyCount > len(items) {
+			L.RaiseError("pipeline() expects an array of items, got a table with named keys")
+		}
+		if len(items) == 0 {
+			L.RaiseError("pipeline() requires a non-empty array of items")
+		}
+
+		rawStages, err := tableToSlice(stagesT)
+		if err != nil {
+			L.RaiseError("pipeline() stages: %s", err.Error())
+		}
+		keyCount = 0
+		stagesT.ForEach(func(_, _ lua.LValue) { keyCount++ })
+		if keyCount > len(rawStages) {
+			L.RaiseError("pipeline() expects an array of stage objects, got a table with named keys")
+		}
+		if len(rawStages) == 0 {
+			L.RaiseError("pipeline() requires a non-empty array of stages")
+		}
+
+		type stage struct {
+			prompt    string
+			label     string
+			isJSON    bool
+			spawnOpts SpawnOpts
+			schema    *Schema
+		}
+		stages := make([]stage, len(rawStages))
+		for i, s := range rawStages {
+			specT, ok := s.(*lua.LTable)
+			if !ok {
+				L.RaiseError("pipeline() stage at index %d is not an object", i+1)
+			}
+			p := lua.LVAsString(specT.RawGetString("prompt"))
+			if p == "" {
+				L.RaiseError("pipeline() stage at index %d is missing a prompt string", i+1)
+			}
+			var label string
+			if l := specT.RawGetString("label"); l != lua.LNil {
+				label = lua.LVAsString(l)
+			}
+			var isJSON bool
+			if j := specT.RawGetString("json"); j != lua.LNil {
+				isJSON = lua.LVAsBool(j)
+			}
+			schema := parseSchemaOpt(L, specT, "pipeline()")
+			stages[i] = stage{
+				prompt:    p,
+				label:     label,
+				isJSON:    isJSON,
+				spawnOpts: parseSpawnOpts(L, specT),
+				schema:    schema,
+			}
+		}
+
+		startIdx, err := st.reserveIndices(len(items) * len(stages))
+		if err != nil {
+			L.RaiseError("%s", err.Error())
+		}
+
+		type spawnResult struct {
+			text string
+			err  error
+		}
+		results := make([]spawnResult, len(items))
+		var wg sync.WaitGroup
+		for i, item := range items {
+			wg.Add(1)
+			go func(i int, item lua.LValue) {
+				defer wg.Done()
+
+				itemStr := lua.LVAsString(item)
+				output := ""
+				for j, sg := range stages {
+					stageOutput, err := func() (string, error) {
+						// Acquire the semaphore per stage so concurrency is
+						// bounded by live work, not by items holding slots
+						// while waiting on earlier stages of their own chain.
+						select {
+						case st.sem <- struct{}{}:
+							defer func() { <-st.sem }()
+						case <-st.ctx.Done():
+							return "", st.ctx.Err()
+						}
+
+						prompt := strings.ReplaceAll(sg.prompt, "{{item}}", itemStr)
+						prompt = strings.ReplaceAll(prompt, "{{output}}", output)
+
+						idx := startIdx + i*len(stages) + j
+						label := sg.label
+						if label == "" {
+							label = fmt.Sprintf("Pipeline %d stage %d/%d", i+1, j+1, len(stages))
+						}
+
+						st.progress("agent_start", idx, label, "")
+
+						text, err := st.spawnWithSchema(st.ctx, idx, label, prompt, sg.spawnOpts, sg.schema)
+						if err != nil {
+							st.progress("agent_error", idx, label, err.Error())
+							return "", fmt.Errorf("stage %d/%d failed for item %q: %w", j+1, len(stages), itemStr, err)
+						}
+						st.progress("agent_done", idx, label, "")
+						return text, nil
+					}()
+					if err != nil {
+						results[i] = spawnResult{err: err}
+						return
+					}
+					output = stageOutput
+				}
+				results[i] = spawnResult{text: output}
+			}(i, item)
+		}
+		wg.Wait()
+
+		out := L.NewTable()
+		for i, res := range results {
+			entry := L.NewTable()
+			itemStr := lua.LVAsString(items[i])
+			if res.err != nil {
+				entry.RawSetString("ok", lua.LFalse)
+				entry.RawSetString("error", lua.LString(res.err.Error()))
+				entry.RawSetString("item", lua.LString(itemStr))
+			} else {
+				value := lua.LValue(lua.LString(res.text))
+				if stages[len(stages)-1].isJSON {
+					jsTxt, err := extractJSON(res.text)
+					if err != nil {
+						entry.RawSetString("ok", lua.LFalse)
+						entry.RawSetString("error", lua.LString(err.Error()))
+					} else {
+						luaVal, err := jsonToLua(L, jsTxt)
+						if err != nil {
+							entry.RawSetString("ok", lua.LFalse)
+							entry.RawSetString("error", lua.LString(err.Error()))
+						} else {
+							entry.RawSetString("ok", lua.LTrue)
+							entry.RawSetString("value", luaVal)
+						}
+					}
+				} else {
+					entry.RawSetString("ok", lua.LTrue)
+					entry.RawSetString("value", value)
+				}
+				entry.RawSetString("item", lua.LString(itemStr))
+			}
+			out.RawSetInt(i+1, entry)
+		}
+
+		L.Push(out)
+		return 1
 	}))
 }
 

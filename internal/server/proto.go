@@ -522,6 +522,90 @@ func (c *controllerV1) handleGetWorkspaceSessionMessages(w http.ResponseWriter, 
 	jsonEncode(w, messagesToProto(messages))
 }
 
+// handleGetWorkspaceSessionChildren lists a session's direct child
+// (subagent) sessions.
+//
+//	@Summary		List session children
+//	@Tags			sessions
+//	@Produce		json
+//	@Param			id	path		string			true	"Workspace ID"
+//	@Param			sid	path		string			true	"Session ID"
+//	@Success		200	{array}		proto.Session
+//	@Failure		404	{object}	proto.Error
+//	@Failure		500	{object}	proto.Error
+//	@Router			/workspaces/{id}/sessions/{sid}/children [get]
+func (c *controllerV1) handleGetWorkspaceSessionChildren(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sid := r.PathValue("sid")
+	sessions, err := c.backend.ListSessionChildren(r.Context(), id, sid)
+	if err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+	result := make([]proto.Session, len(sessions))
+	for i, s := range sessions {
+		result[i] = sessionToProto(s)
+	}
+	jsonEncode(w, result)
+}
+
+// handleGetWorkspaceSessionForks lists a session's forks.
+//
+//	@Summary		List session forks
+//	@Tags			sessions
+//	@Produce		json
+//	@Param			id	path		string			true	"Workspace ID"
+//	@Param			sid	path		string			true	"Origin session ID"
+//	@Success		200	{array}		proto.Session
+//	@Failure		404	{object}	proto.Error
+//	@Failure		500	{object}	proto.Error
+//	@Router			/workspaces/{id}/sessions/{sid}/forks [get]
+func (c *controllerV1) handleGetWorkspaceSessionForks(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sid := r.PathValue("sid")
+	sessions, err := c.backend.ListSessionForks(r.Context(), id, sid)
+	if err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+	result := make([]proto.Session, len(sessions))
+	for i, s := range sessions {
+		result[i] = sessionToProto(s)
+	}
+	jsonEncode(w, result)
+}
+
+// handlePostWorkspaceSessionFork forks a session at a checkpoint message.
+//
+//	@Summary		Fork session at message
+//	@Tags			sessions
+//	@Accept			json
+//	@Produce		json
+//	@Param			id		path		string									true	"Workspace ID"
+//	@Param			sid		path		string									true	"Origin session ID"
+//	@Param			request	body		proto.ForkSessionRequest				true	"Fork parameters"
+//	@Success		200		{object}	proto.Session
+//	@Failure		400		{object}	proto.Error
+//	@Failure		404		{object}	proto.Error
+//	@Failure		500		{object}	proto.Error
+//	@Router			/workspaces/{id}/sessions/{sid}/fork [post]
+func (c *controllerV1) handlePostWorkspaceSessionFork(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sid := r.PathValue("sid")
+	var req proto.ForkSessionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+	fork, err := c.backend.ForkSession(r.Context(), id, sid, req.CheckpointMessageID, req.Title)
+	if err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+	out := sessionToProto(fork)
+	jsonEncode(w, &out)
+}
+
 // handlePutWorkspaceSession updates a session.
 //
 //	@Summary		Update session
