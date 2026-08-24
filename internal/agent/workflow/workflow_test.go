@@ -987,6 +987,28 @@ func TestWorkflowRun_Pipeline(t *testing.T) {
 		require.NoError(t, err)
 		require.Contains(t, res.Value, "limit (6) reached")
 	})
+
+	t.Run("releases semaphore between stages", func(t *testing.T) {
+		t.Parallel()
+		script := `
+			local res = pipeline(
+				{"item1"},
+				{
+					{prompt = "s1 {{item}}"},
+					{prompt = "s2 {{output}}"}
+				}
+			)
+			return res
+		`
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		res, err := Run(ctx, script,
+			func(context.Context, int, string, string, SpawnOpts) (string, error) { return "ok", nil },
+			Options{MaxConcurrent: 1, Timeout: 2 * time.Second},
+		)
+		require.NoError(t, err)
+		require.Equal(t, 2, res.AgentCount)
+	})
 }
 
 func TestWorkflowRun_SchemaValidation(t *testing.T) {

@@ -795,36 +795,41 @@ func registerPipeline(L *lua.LState, st *runState) {
 				itemStr := lua.LVAsString(item)
 				output := ""
 				for j, sg := range stages {
-					// Acquire the semaphore per stage so concurrency is
-					// bounded by live work, not by items holding slots
-					// while waiting on earlier stages of their own chain.
-					select {
-					case st.sem <- struct{}{}:
-						defer func() { <-st.sem }()
-					case <-st.ctx.Done():
-						results[i] = spawnResult{err: st.ctx.Err()}
-						return
-					}
+					stageOutput, err := func() (string, error) {
+						// Acquire the semaphore per stage so concurrency is
+						// bounded by live work, not by items holding slots
+						// while waiting on earlier stages of their own chain.
+						select {
+						case st.sem <- struct{}{}:
+							defer func() { <-st.sem }()
+						case <-st.ctx.Done():
+							return "", st.ctx.Err()
+						}
 
-					prompt := strings.ReplaceAll(sg.prompt, "{{item}}", itemStr)
-					prompt = strings.ReplaceAll(prompt, "{{output}}", output)
+						prompt := strings.ReplaceAll(sg.prompt, "{{item}}", itemStr)
+						prompt = strings.ReplaceAll(prompt, "{{output}}", output)
 
-					idx := startIdx + i*len(stages) + j
-					label := sg.label
-					if label == "" {
-						label = fmt.Sprintf("Pipeline %d stage %d/%d", i+1, j+1, len(stages))
-					}
+						idx := startIdx + i*len(stages) + j
+						label := sg.label
+						if label == "" {
+							label = fmt.Sprintf("Pipeline %d stage %d/%d", i+1, j+1, len(stages))
+						}
 
-					st.progress("agent_start", idx, label, "")
+						st.progress("agent_start", idx, label, "")
 
-					text, err := st.spawnWithSchema(st.ctx, idx, label, prompt, sg.spawnOpts, sg.schema)
+						text, err := st.spawnWithSchema(st.ctx, idx, label, prompt, sg.spawnOpts, sg.schema)
+						if err != nil {
+							st.progress("agent_error", idx, label, err.Error())
+							return "", fmt.Errorf("stage %d/%d failed for item %q: %w", j+1, len(stages), itemStr, err)
+						}
+						st.progress("agent_done", idx, label, "")
+						return text, nil
+					}()
 					if err != nil {
-						st.progress("agent_error", idx, label, err.Error())
-						results[i] = spawnResult{err: fmt.Errorf("stage %d/%d failed for item %q: %w", j+1, len(stages), itemStr, err)}
+						results[i] = spawnResult{err: err}
 						return
 					}
-					st.progress("agent_done", idx, label, "")
-					output = text
+					output = stageOutput
 				}
 				results[i] = spawnResult{text: output}
 			}(i, item)
