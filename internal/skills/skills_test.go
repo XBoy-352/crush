@@ -446,6 +446,32 @@ func TestDiscoverBuiltin(t *testing.T) {
 		}
 	}
 	require.True(t, foundHooks, "crush-hooks builtin skill not found")
+
+	var foundArtifacts bool
+	for _, s := range discovered {
+		if s.Name == "artifacts" {
+			foundArtifacts = true
+			require.Equal(t, "crush://skills/artifacts/SKILL.md", s.SkillFilePath)
+			require.Equal(t, "crush://skills/artifacts", s.Path)
+			require.NotEmpty(t, s.Description)
+			require.NotEmpty(t, s.Instructions)
+			require.True(t, s.Builtin)
+		}
+	}
+	require.True(t, foundArtifacts, "artifacts builtin skill not found")
+
+	var foundUIDesign bool
+	for _, s := range discovered {
+		if s.Name == "ui-design" {
+			foundUIDesign = true
+			require.Equal(t, "crush://skills/ui-design/SKILL.md", s.SkillFilePath)
+			require.Equal(t, "crush://skills/ui-design", s.Path)
+			require.NotEmpty(t, s.Description)
+			require.NotEmpty(t, s.Instructions)
+			require.True(t, s.Builtin)
+		}
+	}
+	require.True(t, foundUIDesign, "ui-design builtin skill not found")
 }
 
 func TestDeduplicate(t *testing.T) {
