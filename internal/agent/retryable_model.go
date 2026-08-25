@@ -121,6 +121,13 @@ func (m *retryableLanguageModel) Stream(ctx context.Context, call fantasy.Call) 
 		timer := time.NewTimer(streamIdleTimeout())
 		defer timer.Stop()
 
+		// DSML recovery: buffer text deltas so that if the provider
+		// finishes with "stop" and zero native tool calls we can scan
+		// the full response for leaked tool-call markup before anything
+		// reaches fantasy. Only text is buffered; every other part type
+		// is forwarded immediately.
+		recovery := newDSMLRecovery(call)
+
 		for {
 			select {
 			case <-ctx.Done():
@@ -139,7 +146,7 @@ func (m *retryableLanguageModel) Stream(ctx context.Context, call fantasy.Call) 
 				if part.Type == fantasy.StreamPartTypeError && part.Error != nil {
 					part.Error = mapRetryableStreamErr(part.Error)
 				}
-				if !yield(part) {
+				if !recovery.handlePart(part, yield) {
 					return
 				}
 				// Go 1.23+ timer semantics: Reset after a receive from a
