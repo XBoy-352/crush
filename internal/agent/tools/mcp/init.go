@@ -926,7 +926,6 @@ func createSession(ctx context.Context, cfg *config.ConfigStore, name string, m 
 					Name: name,
 				})
 			},
-			//nolint:staticcheck // LoggingMessageHandler: keep MCP logging working through the SEP-2577 deprecation window.
 			LoggingMessageHandler: func(ctx context.Context, req *mcp.LoggingMessageRequest) {
 				level := parseLevel(string(req.Params.Level))
 				slog.Log(ctx, level, "MCP log", "name", name, "logger", req.Params.Logger, "data", req.Params.Data)
