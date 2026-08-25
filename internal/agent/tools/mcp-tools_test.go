@@ -1,11 +1,98 @@
 package tools
 
 import (
+	"context"
 	"testing"
 
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/stretchr/testify/require"
 )
+
+func TestMCPImageMediaResponseVisionFallback(t *testing.T) {
+	t.Parallel()
+
+	result := mcp.ToolResult{
+		Type:      "image",
+		Data:      []byte("png-bytes"),
+		MediaType: "image/png",
+		Content:   "tool says hi",
+	}
+
+	t.Run("describes image when model cannot see", func(t *testing.T) {
+		t.Parallel()
+
+		ctx := context.WithValue(context.Background(), SupportsImagesContextKey, false)
+		ctx = context.WithValue(ctx, VisionDescribeFuncContextKey,
+			DescribeImageFunc(func(_ context.Context, data []byte, mediaType string) (string, error) {
+				require.Equal(t, result.Data, data)
+				require.Equal(t, "image/png", mediaType)
+				return "A chart of monthly sales.", nil
+			}))
+
+		resp, err := imageMediaResponse(ctx, result)
+		require.NoError(t, err)
+		require.False(t, resp.IsError)
+		require.Contains(t, resp.Content, "tool says hi")
+		require.Contains(t, resp.Content, "[Image description]")
+		require.Contains(t, resp.Content, "A chart of monthly sales.")
+	})
+
+	t.Run("errors without describe func", func(t *testing.T) {
+		t.Parallel()
+
+		ctx := context.WithValue(context.Background(), SupportsImagesContextKey, false)
+		resp, err := imageMediaResponse(ctx, result)
+		require.NoError(t, err)
+		require.True(t, resp.IsError)
+		require.Contains(t, resp.Content, "does not support image data")
+	})
+
+	t.Run("describe failure falls back to error", func(t *testing.T) {
+		t.Parallel()
+
+		ctx := context.WithValue(context.Background(), SupportsImagesContextKey, false)
+		ctx = context.WithValue(ctx, VisionDescribeFuncContextKey,
+			DescribeImageFunc(func(context.Context, []byte, string) (string, error) {
+				return "", context.DeadlineExceeded
+			}))
+
+		resp, err := imageMediaResponse(ctx, result)
+		require.NoError(t, err)
+		require.True(t, resp.IsError)
+		require.Contains(t, resp.Content, "does not support image data")
+	})
+
+	t.Run("non-image media type errors without describing", func(t *testing.T) {
+		t.Parallel()
+
+		mediaResult := mcp.ToolResult{
+			Type:      "media",
+			Data:      []byte("audio-bytes"),
+			MediaType: "audio/wav",
+		}
+		ctx := context.WithValue(context.Background(), SupportsImagesContextKey, false)
+		ctx = context.WithValue(ctx, VisionDescribeFuncContextKey,
+			DescribeImageFunc(func(context.Context, []byte, string) (string, error) {
+				t.Fatal("describe must not be called for non-image media")
+				return "", nil
+			}))
+
+		resp, err := imageMediaResponse(ctx, mediaResult)
+		require.NoError(t, err)
+		require.True(t, resp.IsError)
+		require.Contains(t, resp.Content, "does not support image data")
+	})
+
+	t.Run("vision model gets the raw image response", func(t *testing.T) {
+		t.Parallel()
+
+		ctx := context.WithValue(context.Background(), SupportsImagesContextKey, true)
+		resp, err := imageMediaResponse(ctx, result)
+		require.NoError(t, err)
+		require.False(t, resp.IsError)
+		require.Equal(t, "tool says hi", resp.Content)
+	})
+}
 
 // findRefs collects every $ref value left anywhere in a schema.
 func findRefs(node any, out *[]string) {

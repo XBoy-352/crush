@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"maps"
 	"slices"
 	"strings"
@@ -208,20 +209,41 @@ func (m *Tool) Run(ctx context.Context, params fantasy.ToolCall) (fantasy.ToolRe
 
 	switch result.Type {
 	case "image", "media":
-		if !GetSupportsImagesFromContext(ctx) {
-			modelName := GetModelNameFromContext(ctx)
-			return fantasy.NewTextErrorResponse(fmt.Sprintf("This model (%s) does not support image data.", modelName)), nil
-		}
-
-		var response fantasy.ToolResponse
-		if result.Type == "image" {
-			response = fantasy.NewImageResponse(result.Data, result.MediaType)
-		} else {
-			response = fantasy.NewMediaResponse(result.Data, result.MediaType)
-		}
-		response.Content = result.Content
-		return response, nil
+		return imageMediaResponse(ctx, result)
 	default:
 		return fantasy.NewTextResponse(result.Content), nil
 	}
+}
+
+// imageMediaResponse converts an MCP image/media tool result into a tool
+// response. When the large model cannot see images, a vision-capable model
+// (plumbed via the context) describes the image and the description is
+// returned as text instead.
+func imageMediaResponse(ctx context.Context, result mcp.ToolResult) (fantasy.ToolResponse, error) {
+	if !GetSupportsImagesFromContext(ctx) {
+		modelName := GetModelNameFromContext(ctx)
+		describe := GetDescribeImageFromContext(ctx)
+		if describe == nil || !strings.HasPrefix(result.MediaType, "image/") {
+			return fantasy.NewTextErrorResponse(fmt.Sprintf("This model (%s) does not support image data.", modelName)), nil
+		}
+		desc, descErr := describe(ctx, result.Data, result.MediaType)
+		if descErr != nil {
+			slog.Warn("Vision description of MCP tool image failed", "error", descErr)
+			return fantasy.NewTextErrorResponse(fmt.Sprintf("This model (%s) does not support image data.", modelName)), nil
+		}
+		content := result.Content
+		if content != "" {
+			content += "\n\n"
+		}
+		return fantasy.NewTextResponse(content + "[Image description]\n" + desc), nil
+	}
+
+	var response fantasy.ToolResponse
+	if result.Type == "image" {
+		response = fantasy.NewImageResponse(result.Data, result.MediaType)
+	} else {
+		response = fantasy.NewMediaResponse(result.Data, result.MediaType)
+	}
+	response.Content = result.Content
+	return response, nil
 }

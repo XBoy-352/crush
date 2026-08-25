@@ -9,6 +9,7 @@ import (
 	"html/template"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -206,10 +207,6 @@ func NewViewTool(
 					return fantasy.NewTextErrorResponse(fmt.Sprintf("Image file is too large (%d bytes). Maximum size is %d bytes",
 						fileInfo.Size(), MaxViewSize)), nil
 				}
-				if !GetSupportsImagesFromContext(ctx) {
-					modelName := GetModelNameFromContext(ctx)
-					return fantasy.NewTextErrorResponse(fmt.Sprintf("This model (%s) does not support image data.", modelName)), nil
-				}
 
 				imageData, readErr := os.ReadFile(filePath)
 				if readErr != nil {
@@ -223,6 +220,20 @@ func NewViewTool(
 				// on mismatch, so prefer the sniffed type whenever
 				// it identifies a supported image format.
 				mimeType = sniffImageMimeType(imageData, mimeType)
+
+				if !GetSupportsImagesFromContext(ctx) {
+					modelName := GetModelNameFromContext(ctx)
+					describe := GetDescribeImageFromContext(ctx)
+					if describe == nil {
+						return fantasy.NewTextErrorResponse(fmt.Sprintf("This model (%s) does not support image data.", modelName)), nil
+					}
+					desc, descErr := describe(ctx, imageData, mimeType)
+					if descErr != nil {
+						slog.Warn("Vision description of image failed", "error", descErr)
+						return fantasy.NewTextErrorResponse(fmt.Sprintf("This model (%s) does not support image data.", modelName)), nil
+					}
+					return fantasy.NewTextResponse(fmt.Sprintf("[Image: %s]\n%s", filePath, desc)), nil
+				}
 
 				return fantasy.NewImageResponse(imageData, mimeType), nil
 			}

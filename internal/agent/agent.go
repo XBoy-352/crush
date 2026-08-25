@@ -926,6 +926,9 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	}()
 
 	history, files := a.preparePrompt(msgs, largeModel.CatwalkCfg.SupportsImages, currentSession.Todos, call.Attachments...)
+	if !largeModel.CatwalkCfg.SupportsImages {
+		history, files = transcribeImageParts(genCtx, history, files, largeModel, a.smallModel.Get(), call.SessionID)
+	}
 
 	startTime := time.Now()
 	a.eventPromptSent(call.SessionID)
@@ -1028,6 +1031,15 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			callContext = context.WithValue(callContext, tools.MessageIDContextKey, assistantMsg.ID)
 			callContext = context.WithValue(callContext, tools.SupportsImagesContextKey, largeModel.CatwalkCfg.SupportsImages)
 			callContext = context.WithValue(callContext, tools.ModelNameContextKey, largeModel.CatwalkCfg.Name)
+			if !largeModel.CatwalkCfg.SupportsImages {
+				if sm := a.smallModel.Get(); sm.CatwalkCfg.SupportsImages {
+					sm := sm
+					callContext = context.WithValue(callContext, tools.VisionDescribeFuncContextKey,
+						tools.DescribeImageFunc(func(c context.Context, data []byte, mediaType string) (string, error) {
+							return DescribeImage(c, sm.Model, data, mediaType)
+						}))
+				}
+			}
 			currentAssistant = &assistantMsg
 			return callContext, prepared, err
 		},

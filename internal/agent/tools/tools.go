@@ -16,6 +16,7 @@ type (
 	messageIDContextKey     string
 	supportsImagesKey       string
 	modelNameKey            string
+	visionDescribeFuncKey   string
 )
 
 const (
@@ -31,6 +32,10 @@ const (
 	SupportsImagesContextKey supportsImagesKey = "supports_images"
 	// ModelNameContextKey is the key for the model name in the context.
 	ModelNameContextKey modelNameKey = "model_name"
+	// VisionDescribeFuncContextKey is the key for a func that describes an
+	// image via a vision-capable model. Set only when the large model
+	// cannot see images but a vision-capable small model is available.
+	VisionDescribeFuncContextKey visionDescribeFuncKey = "vision_describe_func"
 )
 
 // getContextValue is a generic helper that retrieves a typed value from context.
@@ -73,6 +78,16 @@ func GetSupportsImagesFromContext(ctx context.Context) bool {
 // GetModelNameFromContext retrieves the model name from the context.
 func GetModelNameFromContext(ctx context.Context) string {
 	return getContextValue(ctx, ModelNameContextKey, "")
+}
+
+// DescribeImageFunc describes image bytes as text via a vision-capable
+// model. Data is the raw image bytes and mediaType its MIME type.
+type DescribeImageFunc func(ctx context.Context, data []byte, mediaType string) (string, error)
+
+// GetDescribeImageFromContext retrieves the vision describe func from the
+// context, or nil when no vision-capable model is available.
+func GetDescribeImageFromContext(ctx context.Context) DescribeImageFunc {
+	return getContextValue(ctx, VisionDescribeFuncContextKey, DescribeImageFunc(nil))
 }
 
 // NewPermissionDeniedResponse returns a tool response indicating the user
