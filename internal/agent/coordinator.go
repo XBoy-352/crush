@@ -35,6 +35,7 @@ import (
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
+	openaioauth "github.com/charmbracelet/crush/internal/oauth/openai"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/question"
@@ -1047,6 +1048,13 @@ func (c *coordinator) buildOpenaiProvider(baseURL, apiKey string, headers map[st
 	opts := []openai.Option{
 		openai.WithAPIKey(apiKey),
 		openai.WithUseResponsesAPI(),
+	}
+	if baseURL == openaioauth.CodexBaseURL {
+		// The ChatGPT Codex backend rejects sampling and token-limit
+		// parameters outright, so strip them from every request body.
+		for _, key := range openaioauth.CodexUnsupportedParams {
+			opts = append(opts, openai.WithSDKOptions(openaisdk.WithJSONDel(key)))
+		}
 	}
 	if c.cfg.Config().Options.Debug {
 		httpClient := log.NewHTTPClient()

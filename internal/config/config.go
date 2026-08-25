@@ -183,12 +183,15 @@ func (c *ProviderConfig) SetupGitHubCopilot() {
 	maps.Copy(c.ExtraHeaders, copilot.Headers())
 }
 
-// SetupOpenAIOAuth applies headers derived from a ChatGPT OAuth access token
-// (e.g. ChatGPT-Account-ID from JWT claims) when present.
+// SetupOpenAIOAuth applies ChatGPT OAuth-specific configuration: it routes
+// the provider to the Codex backend (subscription tokens are not valid on
+// the api.openai.com platform API) and derives headers from the OAuth access
+// token (e.g. ChatGPT-Account-ID from JWT claims) when present.
 func (c *ProviderConfig) SetupOpenAIOAuth() {
 	if c.OAuthToken == nil || c.OAuthToken.AccessToken == "" {
 		return
 	}
+	c.BaseURL = openaioauth.CodexBaseURL
 	if accountID := openaioauth.ChatGPTAccountID(c.OAuthToken.AccessToken); accountID != "" {
 		if c.ExtraHeaders == nil {
 			c.ExtraHeaders = make(map[string]string)

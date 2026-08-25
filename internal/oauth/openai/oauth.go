@@ -30,7 +30,24 @@ const (
 	deviceRedirectURI = defaultIssuer + "/deviceauth/callback"
 
 	userAgent = "crush"
+
+	// CodexBaseURL is the ChatGPT backend that subscription OAuth tokens
+	// authenticate against. They are rejected by the api.openai.com
+	// platform API.
+	CodexBaseURL = "https://chatgpt.com/backend-api/codex"
 )
+
+// CodexUnsupportedParams are request body fields the Codex backend rejects
+// with "Unsupported parameter" — it does not honor sampling controls or
+// output token limits.
+var CodexUnsupportedParams = []string{
+	"max_output_tokens",
+	"temperature",
+	"top_p",
+	"top_k",
+	"frequency_penalty",
+	"presence_penalty",
+}
 
 // Overridable for tests.
 var (
