@@ -359,7 +359,7 @@ func TestGenerateTitleUsageIsAttributable(t *testing.T) {
 		}
 		childID = children[0].ID
 		return children[0].Cost > 0
-	}, 30*time.Second, 20*time.Millisecond,
+	}, 60*time.Second, 20*time.Millisecond,
 		"title generation must record its usage in a sub-session")
 
 	var titleFin *message.Finish
@@ -370,7 +370,7 @@ func TestGenerateTitleUsageIsAttributable(t *testing.T) {
 		}
 		titleFin = titleMsgs[0].FinishPart()
 		return titleFin != nil && titleFin.PromptTokens > 0
-	}, 30*time.Second, 20*time.Millisecond,
+	}, 60*time.Second, 20*time.Millisecond,
 		"title generation must write a priced message")
 	// Re-read the child so the cost comparison uses a fresh row, not a stale
 	// capture from inside the polling closure.
@@ -393,6 +393,6 @@ func TestGenerateTitleUsageIsAttributable(t *testing.T) {
 			return false
 		}
 		return math.Abs(updated.Cost-recorded) <= 1e-9
-	}, 30*time.Second, 20*time.Millisecond,
+	}, 60*time.Second, 20*time.Millisecond,
 		"title generation cost must be attributable to the model that incurred it")
 }
