@@ -46,7 +46,7 @@ const (
 	TodoPendingIcon    string = "•"
 	TodoInProgressIcon string = "→"
 
-	ImageIcon  string = "■"
+	ImageIcon  string = "▣"
 	TextIcon   string = "≡"
 	SkillIcon  string = "▲"
 	RemoveIcon string = "✕"
