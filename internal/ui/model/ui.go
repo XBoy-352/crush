@@ -3893,7 +3893,11 @@ func (m *UI) currentModelSupportsImages() bool {
 		return false
 	}
 	model := cfg.GetModelByType(agentCfg.Model)
-	return model != nil && model.SupportsImages
+	if model != nil && model.SupportsImages {
+		return true
+	}
+	small := cfg.SmallModel()
+	return small != nil && small.SupportsImages
 }
 
 // toggleCompactMode toggles compact mode between uiChat and uiChatCompact states.
