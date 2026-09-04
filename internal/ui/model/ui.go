@@ -6064,7 +6064,7 @@ func (m *UI) pasteImageFromClipboard() tea.Msg {
 	}
 }
 
-var pasteRE = regexp.MustCompile(`paste_(\d+).txt`)
+var pasteRE = regexp.MustCompile(`paste_(\d+)\.(txt|png)`)
 
 func (m *UI) pasteIdx() int {
 	result := 0
