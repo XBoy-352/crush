@@ -610,6 +610,19 @@ func (c *Commands) defaultCommands() []*CommandItem {
 	}
 	commands = append(commands, NewCommandItem(c.com.Styles, "toggle_transparent", transparentLabel, "", ActionToggleTransparentBackground{}))
 
+	// Add web search backend toggle for the agentic fetch sub-agent.
+	searchEngineLabel := "Search Backend: DuckDuckGo"
+	if cfg != nil && cfg.Options != nil && cfg.Options.WebSearchEngine == "searxng" {
+		searchEngineLabel = "Search Backend: SearXNG"
+	}
+	commands = append(commands, NewCommandItem(
+		c.com.Styles,
+		"toggle_search_engine",
+		searchEngineLabel,
+		"",
+		ActionToggleSearchEngine{},
+	).WithDescription("Switch the web_search backend used by agentic fetch (SearXNG falls back to DuckDuckGo when unreachable)"))
+
 	commands = append(
 		commands,
 		NewCommandItem(c.com.Styles, "quit", "Quit", "ctrl+c", tea.QuitMsg{}).WithAliases("exit"),

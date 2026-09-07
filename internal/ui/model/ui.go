@@ -2193,6 +2193,25 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 	case dialog.ActionToggleYoloMode:
 		m.toggleYoloMode()
 		m.dialog.CloseDialog(dialog.CommandsID)
+	case dialog.ActionToggleSearchEngine:
+		cfg := m.com.Config()
+		if cfg != nil && cfg.Options != nil {
+			engine := "searxng"
+			if cfg.Options.WebSearchEngine == "searxng" {
+				engine = "duckduckgo"
+			}
+			cfg.Options.WebSearchEngine = engine
+			if err := m.com.Workspace.SetConfigField(config.ScopeGlobal, "options.web_search_engine", engine); err != nil {
+				cmds = append(cmds, util.ReportError(err))
+			} else {
+				label := "DuckDuckGo"
+				if engine == "searxng" {
+					label = "SearXNG (falls back to DuckDuckGo)"
+				}
+				cmds = append(cmds, util.CmdHandler(util.NewInfoMsg("Search backend set to: " + label)))
+			}
+		}
+		m.dialog.CloseDialog(dialog.CommandsID)
 	case dialog.ActionTogglePlanMode:
 		plan := m.togglePlanMode()
 		m.dialog.CloseDialog(dialog.CommandsID)

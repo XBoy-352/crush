@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -110,6 +111,67 @@ func searchDuckDuckGo(ctx context.Context, client *http.Client, query string, ma
 	}
 
 	return parseLiteSearchResults(content, maxResults)
+}
+
+// searxngResponse is the JSON payload served by a SearXNG instance's
+// /search endpoint when requested with format=json.
+type searxngResponse struct {
+	Results []searxngResult `json:"results"`
+}
+
+type searxngResult struct {
+	URL     string `json:"url"`
+	Title   string `json:"title"`
+	Content string `json:"content"`
+}
+
+// searchSearXNG queries a SearXNG instance's JSON API. The instance must
+// have the json format enabled in its settings (searxng.formats).
+func searchSearXNG(ctx context.Context, client *http.Client, baseURL, query string, maxResults int) ([]SearchResult, error) {
+	if maxResults <= 0 {
+		maxResults = 10
+	}
+
+	searchURL := strings.TrimSuffix(baseURL, "/") +
+		"/search?q=" + url.QueryEscape(query) + "&format=json"
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute search: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("search failed with status code: %d", resp.StatusCode)
+	}
+
+	var payload searxngResponse
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("failed to decode search response: %w", err)
+	}
+
+	results := make([]SearchResult, 0, len(payload.Results))
+	for _, r := range payload.Results {
+		if r.URL == "" {
+			continue
+		}
+		results = append(results, SearchResult{
+			Title:    r.Title,
+			Link:     r.URL,
+			Snippet:  r.Content,
+			Position: len(results) + 1,
+		})
+		if len(results) >= maxResults {
+			break
+		}
+	}
+	return results, nil
 }
 
 func setRandomizedHeaders(req *http.Request) {
