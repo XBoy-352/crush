@@ -26,6 +26,7 @@ import (
 func TestBackgroundJobCarriesNoOutput(t *testing.T) {
 	want := map[string]bool{
 		"ID": true, "SessionID": true, "Command": true, "Description": true,
+		"Kind": true, "ChildSessionID": true, "Title": true,
 		"StartedAt": true, "Done": true,
 	}
 	typ := reflect.TypeFor[proto.BackgroundJob]()

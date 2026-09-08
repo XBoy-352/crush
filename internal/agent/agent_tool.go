@@ -4,9 +4,11 @@ import (
 	"context"
 	_ "embed"
 	"errors"
+	"fmt"
 
 	"charm.land/fantasy"
 
+	"github.com/charmbracelet/crush/internal/agent/childjobs"
 	"github.com/charmbracelet/crush/internal/agent/prompt"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
@@ -55,14 +57,27 @@ func (c *coordinator) agentTool(ctx context.Context) (fantasy.AgentTool, error) 
 				return fantasy.ToolResponse{}, errors.New("agent message id missing from context")
 			}
 
-			return c.runSubAgent(ctx, subAgentParams{
+			subParams := subAgentParams{
 				Agent:          agent,
 				SessionID:      sessionID,
 				AgentMessageID: agentMessageID,
 				ToolCallID:     call.ID,
 				Prompt:         params.Prompt,
 				SessionTitle:   "New Agent Session",
-			})
+			}
+
+			if !c.interactive {
+				// Headless (`crush run`) must not exit before children finish.
+				return c.runSubAgent(ctx, subParams)
+			}
+
+			jobID, err := c.startSubAgent(ctx, subParams, childjobs.KindAgent)
+			if err != nil {
+				return fantasy.NewTextErrorResponse(err.Error()), nil
+			}
+			return fantasy.NewTextResponse(fmt.Sprintf(
+				"Subagent started in the background (job %s). You will be notified when it completes - do not poll, sleep, or check on it. Continue with other work or respond to the user. Use job_kill to stop it.",
+				jobID)), nil
 		},
 	), nil
 }

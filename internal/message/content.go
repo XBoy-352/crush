@@ -24,6 +24,7 @@ const (
 	User      MessageRole = "user"
 	System    MessageRole = "system"
 	Tool      MessageRole = "tool"
+	Notice    MessageRole = "notice"
 )
 
 // mediaLoadFailedPlaceholder is the text substituted for image data that
@@ -605,6 +606,20 @@ func (m *Message) ToAIMessage() []fantasy.Message {
 		messages = append(messages, fantasy.Message{
 			Role:    fantasy.MessageRoleUser,
 			Content: parts,
+		})
+	case Notice:
+		// A machine-generated notification (background job or subagent
+		// completion). Stored with its own role but presented to the
+		// model as a user message; the text is the full system-reminder
+		// envelope created at notice time. No attachments, no shell
+		// commands.
+		text := strings.TrimSpace(m.Content().Text)
+		if text == "" {
+			return nil
+		}
+		messages = append(messages, fantasy.Message{
+			Role:    fantasy.MessageRoleUser,
+			Content: []fantasy.MessagePart{fantasy.TextPart{Text: text}},
 		})
 	case Assistant:
 		var parts []fantasy.MessagePart

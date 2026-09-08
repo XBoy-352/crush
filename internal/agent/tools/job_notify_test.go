@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/agent/childjobs"
 	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/stretchr/testify/require"
 )
@@ -86,7 +87,7 @@ func TestJobOutputDiscardsPendingNotice(t *testing.T) {
 
 	input, err := json.Marshal(JobOutputParams{ShellID: meta.ShellID, Wait: true})
 	require.NoError(t, err)
-	out, err := NewJobOutputTool().Run(ctx, fantasy.ToolCall{ID: "c", Name: JobOutputToolName, Input: string(input)})
+	out, err := NewJobOutputTool(childjobs.GetRegistry()).Run(ctx, fantasy.ToolCall{ID: "c", Name: JobOutputToolName, Input: string(input)})
 	require.NoError(t, err)
 	require.Contains(t, out.Content, "collected")
 

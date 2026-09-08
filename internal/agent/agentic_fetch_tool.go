@@ -11,6 +11,7 @@ import (
 
 	"charm.land/fantasy"
 
+	"github.com/charmbracelet/crush/internal/agent/childjobs"
 	"github.com/charmbracelet/crush/internal/agent/prompt"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/permission"
@@ -103,7 +104,6 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 			if err != nil {
 				return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to create temporary directory: %s", err)), nil
 			}
-			defer os.RemoveAll(tmpDir)
 
 			var fullPrompt string
 
@@ -111,6 +111,7 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 				// URL mode: fetch the URL content first.
 				content, err := tools.FetchURLAndConvert(ctx, client, params.URL)
 				if err != nil {
+					os.RemoveAll(tmpDir)
 					return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to fetch URL: %s", err)), nil
 				}
 
@@ -119,12 +120,14 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 				if hasLargeContent {
 					tempFile, err := os.CreateTemp(tmpDir, "page-*.md")
 					if err != nil {
+						os.RemoveAll(tmpDir)
 						return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to create temporary file: %s", err)), nil
 					}
 					tempFilePath := tempFile.Name()
 
 					if _, err := tempFile.WriteString(content); err != nil {
 						tempFile.Close()
+						os.RemoveAll(tmpDir)
 						return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to write content to file: %s", err)), nil
 					}
 					tempFile.Close()
@@ -144,21 +147,25 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 
 			promptTemplate, err := prompt.NewPrompt("agentic_fetch", string(agenticFetchPromptTmpl), promptOpts...)
 			if err != nil {
+				os.RemoveAll(tmpDir)
 				return fantasy.ToolResponse{}, fmt.Errorf("error creating prompt: %s", err)
 			}
 
 			_, small, err := c.buildAgentModels(ctx, true)
 			if err != nil {
+				os.RemoveAll(tmpDir)
 				return fantasy.ToolResponse{}, fmt.Errorf("error building models: %s", err)
 			}
 
 			systemPrompt, err := promptTemplate.Build(ctx, small.Model.Provider(), small.Model.Model(), c.cfg)
 			if err != nil {
+				os.RemoveAll(tmpDir)
 				return fantasy.ToolResponse{}, fmt.Errorf("error building system prompt: %s", err)
 			}
 
 			smallProviderCfg, ok := c.cfg.Config().Providers.Get(small.ModelCfg.Provider)
 			if !ok {
+				os.RemoveAll(tmpDir)
 				return fantasy.ToolResponse{}, errors.New("small model provider not configured")
 			}
 
@@ -194,17 +201,37 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 				Tools:                fetchTools,
 			})
 
-			return c.runSubAgent(ctx, subAgentParams{
+			subParams := subAgentParams{
 				Agent:          agent,
 				SessionID:      validationResult.SessionID,
 				AgentMessageID: validationResult.AgentMessageID,
 				ToolCallID:     call.ID,
 				Prompt:         fullPrompt,
 				SessionTitle:   "Fetch Analysis",
+				Cleanup: func() {
+					os.RemoveAll(tmpDir)
+				},
 				SessionSetup: func(sessionID string) {
 					c.permissions.AutoApproveSession(sessionID)
 				},
-			})
+			}
+
+			if !c.interactive {
+				// Headless (`crush run`) must not exit before children
+				// finish; the sync path keeps tmpDir cleanup as a defer
+				// tied to this call.
+				defer os.RemoveAll(tmpDir)
+				return c.runSubAgent(ctx, subParams)
+			}
+
+			jobID, err := c.startSubAgent(ctx, subParams, childjobs.KindFetch)
+			if err != nil {
+				os.RemoveAll(tmpDir)
+				return fantasy.NewTextErrorResponse(err.Error()), nil
+			}
+			return fantasy.NewTextResponse(fmt.Sprintf(
+				"Web research subagent started in the background (job %s). You will be notified when it completes - do not poll, sleep, or check on it. Continue with other work or respond to the user. Use job_kill to stop it.",
+				jobID)), nil
 		},
 	), nil
 }

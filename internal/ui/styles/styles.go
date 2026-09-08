@@ -300,6 +300,7 @@ type Styles struct {
 		ToolCallFocused  lipgloss.Style
 		ToolCallCompact  lipgloss.Style
 		ToolCallBlurred  lipgloss.Style
+		Notice           lipgloss.Style // Dimmed system notification line (background job/subagent completion); visually distinct from human input.
 
 		// Shell (bang mode) item styles.
 		ShellBarFocused    lipgloss.Style // Left vertical bar when focused.

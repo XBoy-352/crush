@@ -1547,7 +1547,9 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.hasSession() || msg.sessionID != m.session.ID {
 			break
 		}
-		panel := dialog.NewSubagents(m.com, msg.sessionID, m.com.Workspace.ListChildren)
+		panel := dialog.NewSubagents(m.com, msg.sessionID, m.com.Workspace.ListChildren, func(ctx context.Context) ([]proto.BackgroundJob, error) {
+			return m.com.Workspace.ListBackgroundJobs(ctx)
+		})
 		for _, child := range msg.children {
 			panel.HandleLifecycle(&notify.SubAgentLifecycle{
 				ParentSessionID: msg.sessionID,
@@ -2498,7 +2500,7 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			cmds = append(cmds, util.ReportWarn("No branches for this session"))
 			break
 		}
-		panel := dialog.NewSubagents(m.com, msg.originID, nil)
+		panel := dialog.NewSubagents(m.com, msg.originID, nil, nil)
 		for _, fork := range msg.forks {
 			panel.HandleLifecycle(&notify.SubAgentLifecycle{
 				ParentSessionID: msg.originID,
@@ -4779,6 +4781,12 @@ func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.
 
 	// Capture session ID to avoid race with main goroutine updating m.session.
 	sessionID := m.session.ID
+	// Typing while a foreground bash command blocks the turn releases it
+	// to the background (same as Ctrl+B), so the typed message folds in
+	// immediately instead of queueing behind the blocking tool.
+	if m.isAgentBusy() && m.hasForegroundWaitsCached() {
+		cmds = append(cmds, m.backgroundForegroundTools())
+	}
 	// Optimistically mark the agent busy: the prompt we are about to submit
 	// either starts a run or is enqueued behind one. This keeps esc pressed
 	// right after enter routing to cancelAgent instead of reading a stale

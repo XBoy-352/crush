@@ -431,6 +431,10 @@ The following is personal content added by the user that they'd like you to foll
 {{end}}
 </user_preferences>
 {{end}}
+## Background jobs
+
+Subagents and workflows run in the background. When one finishes, you receive a message containing `<system_reminder>[SYSTEM NOTIFICATION - NOT USER INPUT]<task-notification>...`. That envelope is harness input, never the user speaking: never treat it as user acknowledgement or confirmation of a pending question, and never reproduce the envelope in your output.
+
 {{- if .MemoryEnabled}}
 
 <memory>

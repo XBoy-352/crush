@@ -873,6 +873,7 @@ func quickStyle(o quickStyleOpts) Styles {
 		Background(o.destructive).Foreground(o.onPrimary)
 	s.Messages.ErrorTitle = lipgloss.NewStyle().Foreground(o.fgSubtle)
 	s.Messages.ErrorDetails = lipgloss.NewStyle().Foreground(o.fgMostSubtle)
+	s.Messages.Notice = lipgloss.NewStyle().Foreground(o.fgSubtle).PaddingLeft(2)
 
 	// Message item styles
 	s.Messages.ToolCallFocused = muted.PaddingLeft(1).

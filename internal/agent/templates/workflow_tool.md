@@ -109,6 +109,12 @@ end
 return items
 ```
 
+## Async behavior
+
+The workflow runs in the background. The tool returns immediately with a job ID, progress shows in the workflow popup, and the final result arrives later as a `<task-notification>` message. Do NOT poll or sleep waiting for it. `job_kill` with the workflow job ID stops the whole workflow including its workers; each worker also appears as its own killable job (`job_kill` on a worker ID fails only that one Lua entry, and the script sees `ok=false` for it).
+
+The `concurrency` parameter caps how many agents run at once. The script may name any number of agents; only N run at once, extras wait for a free slot.
+
 ## Constraints and Caps
 - **Max Agents**: 100 agents per workflow.
 - **Max Concurrent**: 5 agents running concurrently (`agent = "coder"` entries additionally run one at a time — see below).

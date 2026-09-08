@@ -406,6 +406,8 @@ func ExtractMessageItems(sty *styles.Styles, msg *message.Message, toolResults m
 			))
 		}
 		return items
+	case message.Notice:
+		return []MessageItem{NewNoticeMessageItem(sty, msg)}
 	}
 	return []MessageItem{}
 }

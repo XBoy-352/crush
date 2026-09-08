@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/crush/internal/agent"
+	agentchildjobs "github.com/charmbracelet/crush/internal/agent/childjobs"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/proto"
@@ -212,7 +213,8 @@ func (b *Backend) ListBackgroundJobs(_ context.Context, workspaceID string) ([]p
 		return nil, err
 	}
 	shells := shell.GetBackgroundShellManager().ListJobs()
-	jobs := make([]proto.BackgroundJob, 0, len(shells))
+	childJobs := agentchildjobs.GetRegistry().List()
+	jobs := make([]proto.BackgroundJob, 0, len(shells)+len(childJobs))
 	for _, s := range shells {
 		jobs = append(jobs, proto.BackgroundJob{
 			ID:          s.ID,
@@ -221,6 +223,17 @@ func (b *Backend) ListBackgroundJobs(_ context.Context, workspaceID string) ([]p
 			Description: s.Description,
 			StartedAt:   s.StartedAt,
 			Done:        s.IsDone(),
+		})
+	}
+	for _, j := range childJobs {
+		jobs = append(jobs, proto.BackgroundJob{
+			ID:             j.ID,
+			SessionID:      j.ParentSessionID,
+			Kind:           string(j.Kind),
+			ChildSessionID: j.ChildSessionID,
+			Title:          j.Title,
+			StartedAt:      j.StartedAt,
+			Done:           j.Done(),
 		})
 	}
 	return jobs, nil
@@ -232,7 +245,16 @@ func (b *Backend) KillBackgroundJob(_ context.Context, workspaceID, jobID string
 	if _, err := b.GetWorkspace(workspaceID); err != nil {
 		return err
 	}
-	return shell.GetBackgroundShellManager().Kill(jobID)
+	err := shell.GetBackgroundShellManager().Kill(jobID)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, shell.ErrBackgroundShellNotFound) {
+		if childErr := agentchildjobs.GetRegistry().Kill(jobID); childErr == nil {
+			return nil
+		}
+	}
+	return err
 }
 
 // RevertResult describes the outcome of a revert operation.
