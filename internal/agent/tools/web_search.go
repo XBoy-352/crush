@@ -66,6 +66,7 @@ func NewWebSearchTool(client *http.Client, searxngURL, engine string) fantasy.Ag
 					// The configured instance is unavailable; fall
 					// back to DuckDuckGo instead of failing the call.
 					slog.Warn("SearXNG search failed, falling back to DuckDuckGo", "url", searxngURL, "error", err)
+					maybeDelaySearch()
 					results, err = searchDuckDuckGo(ctx, client, params.Query, maxResults)
 				}
 			default:

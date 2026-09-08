@@ -2208,7 +2208,7 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 				if engine == "searxng" {
 					label = "SearXNG (falls back to DuckDuckGo)"
 				}
-				cmds = append(cmds, util.CmdHandler(util.NewInfoMsg("Search backend set to: " + label)))
+				cmds = append(cmds, util.CmdHandler(util.NewInfoMsg("Search backend set to: "+label)))
 			}
 		}
 		m.dialog.CloseDialog(dialog.CommandsID)
