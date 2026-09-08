@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/agent/notify"
+	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	uv "github.com/charmbracelet/ultraviolet"
@@ -41,6 +42,7 @@ type Subagents struct {
 	com        *common.Common
 	sessionID  string
 	listFn     func(ctx context.Context, sessionID string) ([]session.Session, error)
+	jobsFn     func(ctx context.Context) ([]proto.BackgroundJob, error)
 	rows       []*SubagentRow
 	rowMap     map[string]*SubagentRow
 	selectedIx int
@@ -56,12 +58,15 @@ type Subagents struct {
 var _ Dialog = (*Subagents)(nil)
 
 // NewSubagents creates an empty [Subagents] dialog for sessionID. Rows are
-// loaded via loadFn (usually Workspace.ListChildren).
-func NewSubagents(com *common.Common, sessionID string, loadFn func(ctx context.Context, sessionID string) ([]session.Session, error)) *Subagents {
+// loaded via loadFn (usually Workspace.ListChildren). jobsFn, when set
+// (usually Workspace.ListBackgroundJobs), overlays live child-job status so
+// a persisted child still running in the registry is not shown as done.
+func NewSubagents(com *common.Common, sessionID string, loadFn func(ctx context.Context, sessionID string) ([]session.Session, error), jobsFn func(ctx context.Context) ([]proto.BackgroundJob, error)) *Subagents {
 	s := &Subagents{
 		com:       com,
 		sessionID: sessionID,
 		listFn:    loadFn,
+		jobsFn:    jobsFn,
 		rowMap:    make(map[string]*SubagentRow),
 	}
 
@@ -116,6 +121,24 @@ func (s *Subagents) Load(ctx context.Context) {
 			Cost:      child.Cost,
 			StartedAt: time.Unix(child.CreatedAt, 0),
 		})
+	}
+
+	// Overlay live registry state: a persisted child whose job is still
+	// running must not stay marked done from the snapshot.
+	if s.jobsFn == nil {
+		return
+	}
+	jobs, err := s.jobsFn(ctx)
+	if err != nil {
+		return
+	}
+	for _, j := range jobs {
+		if j.Done || j.ChildSessionID == "" || j.SessionID != s.sessionID {
+			continue
+		}
+		if row, exists := s.rowMap[j.ChildSessionID]; exists && row.Status != "running" {
+			row.Status = "running"
+		}
 	}
 }
 

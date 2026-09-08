@@ -156,6 +156,11 @@ type SessionAgentCall struct {
 	// fantasy retries the stream transparently. Returning an error
 	// surfaces the original auth error without retry.
 	OnAuthRefresh func(ctx context.Context, err *fantasy.ProviderError) error
+	// Notice marks a machine-generated notification turn (background job
+	// or subagent completion), not human input. The message is stored
+	// with the notice role, skips title generation, and is excluded
+	// from the queued prompt pill.
+	Notice bool
 }
 
 type SessionAgent interface {
@@ -845,7 +850,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	// can take tens of seconds. Blocking Run on it delays the
 	// response to the caller. Use a detached context so the title
 	// goroutine survives Run's cancel.
-	if !hasUserTextMessage(msgs) {
+	if !call.Notice && !hasUserTextMessage(msgs) {
 		titleCtx := context.WithoutCancel(ctx)
 		go a.GenerateTitle(titleCtx, call.SessionID, call.Prompt)
 	}
@@ -1718,16 +1723,22 @@ func sessionHeaders(sessionID string) map[string]string {
 func (a *sessionAgent) createUserMessage(ctx context.Context, call SessionAgentCall) (message.Message, error) {
 	parts := []message.ContentPart{message.TextContent{Text: call.Prompt}}
 	var attachmentParts []message.ContentPart
-	for _, attachment := range call.Attachments {
-		attachmentParts = append(attachmentParts, message.BinaryContent{Path: attachment.FilePath, MIMEType: attachment.MimeType, Data: attachment.Content})
+	if !call.Notice {
+		for _, attachment := range call.Attachments {
+			attachmentParts = append(attachmentParts, message.BinaryContent{Path: attachment.FilePath, MIMEType: attachment.MimeType, Data: attachment.Content})
+		}
 	}
 	parts = append(parts, attachmentParts...)
+	role := message.User
+	if call.Notice {
+		role = message.Notice
+	}
 	msg, err := a.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
-		Role:  message.User,
+		Role:  role,
 		Parts: parts,
 	})
 	if err != nil {
-		return message.Message{}, fmt.Errorf("failed to create user message: %w", err)
+		return message.Message{}, fmt.Errorf("failed to create %s message: %w", role, err)
 	}
 	return msg, nil
 }
@@ -2432,7 +2443,14 @@ func (a *sessionAgent) QueuedPrompts(sessionID string) int {
 	if !ok {
 		return 0
 	}
-	return len(l)
+	count := 0
+	for _, call := range l {
+		if call.Notice {
+			continue
+		}
+		count++
+	}
+	return count
 }
 
 func (a *sessionAgent) QueuedPromptsList(sessionID string) []string {
@@ -2440,9 +2458,12 @@ func (a *sessionAgent) QueuedPromptsList(sessionID string) []string {
 	if !ok {
 		return nil
 	}
-	prompts := make([]string, len(l))
-	for i, call := range l {
-		prompts[i] = call.Prompt
+	var prompts []string
+	for _, call := range l {
+		if call.Notice {
+			continue
+		}
+		prompts = append(prompts, call.Prompt)
 	}
 	return prompts
 }

@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/agent/childjobs"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/agent/prompt"
 	"github.com/charmbracelet/crush/internal/agent/tools"
@@ -38,6 +39,9 @@ type WorkflowParams struct {
 	Script      string `json:"script" description:"Lua orchestration script; see tool description for the API"`
 	// Args are exposed to the script as the `args` global table.
 	Args map[string]string `json:"args,omitempty" description:"Optional key/value pairs exposed to the script as the args table"`
+	// Concurrency caps how many agents run at once. The script may name
+	// any number of agents; extras wait for a free slot.
+	Concurrency int `json:"concurrency,omitempty" description:"Maximum agents running at once (default 5). Script may spawn more; extras wait for a free slot."`
 }
 
 // workflowAgentKey identifies one sub-agent variant: a profile ("task" or
@@ -257,14 +261,47 @@ func (c *coordinator) workflowTool(ctx context.Context) (fantasy.AgentTool, erro
 					}
 				}
 
-				resp, err := c.runSubAgent(ctx, subParams)
-				if err != nil {
-					return "", err
+				// Register the worker so job_kill can stop it
+				// individually, then run it synchronously: the spawn
+				// closure must still return the worker's text to the
+				// Lua script. Workers bypass the child-job semaphore;
+				// the workflow engine's own MaxConcurrent already
+				// bounds them.
+				workerJob := &childjobs.Job{
+					Kind:            childjobs.KindWorkflowWorker,
+					ParentSessionID: sessionID,
+					ToolCallID:      fmt.Sprintf("%s-a%d", call.ID, index),
+					Title:           title,
 				}
-				if resp.IsError {
-					return "", errors.New(resp.Content)
+				type workerOutcome struct {
+					text string
+					err  error
 				}
-				return resp.Content, nil
+				outcomeCh := make(chan workerOutcome, 1)
+				if err := childjobs.GetRegistry().StartDetached(ctx, workerJob, func(workerCtx context.Context) (string, error) {
+					resp, runErr := c.runSubAgent(workerCtx, subParams)
+					if runErr != nil {
+						outcomeCh <- workerOutcome{err: runErr}
+						return "", runErr
+					}
+					if workerCtx.Err() != nil {
+						// Killed: surface as ctx error so the job
+						// settles as killed rather than error.
+						outcomeCh <- workerOutcome{err: workerCtx.Err()}
+						return "", workerCtx.Err()
+					}
+					if resp.IsError {
+						outcomeCh <- workerOutcome{err: errors.New(resp.Content)}
+						return "", errors.New(resp.Content)
+					}
+					outcomeCh <- workerOutcome{text: resp.Content}
+					return resp.Content, nil
+				}, nil); err != nil {
+					return "", fmt.Errorf("register workflow worker: %w", err)
+				}
+
+				outcome := <-outcomeCh
+				return outcome.text, outcome.err
 			}
 
 			progressFn := func(p workflow.Progress) {
@@ -287,13 +324,38 @@ func (c *coordinator) workflowTool(ctx context.Context) (fantasy.AgentTool, erro
 				})
 			}
 
-			result, err := workflow.Run(ctx, params.Script, spawn, workflow.Options{
-				Progress: progressFn,
-				Args:     params.Args,
-			})
-			if err != nil {
-				if ctx.Err() != nil {
-					return fantasy.ToolResponse{}, err
+			execute := func(runCtx context.Context) (fantasy.ToolResponse, error) {
+				result, err := workflow.Run(runCtx, params.Script, spawn, workflow.Options{
+					Progress:      progressFn,
+					Args:          params.Args,
+					MaxConcurrent: params.Concurrency,
+				})
+				if err != nil {
+					if runCtx.Err() != nil {
+						return fantasy.ToolResponse{}, err
+					}
+
+					logsStr := "(none)"
+					if len(result.Logs) > 0 {
+						var sb strings.Builder
+						for _, l := range result.Logs {
+							sb.WriteString("- ")
+							sb.WriteString(l)
+							sb.WriteString("\n")
+						}
+						logsStr = sb.String()
+					}
+					return fantasy.WithResponseMetadata(
+						fantasy.NewTextErrorResponse(fmt.Sprintf("workflow failed: %v\n\nLogs:\n%s", err, logsStr)),
+						map[string]any{"agents": result.AgentCount, "logs": result.Logs},
+					), nil
+				}
+
+				var valStr string
+				if result.Value == "" {
+					valStr = "null"
+				} else {
+					valStr = result.Value
 				}
 
 				logsStr := "(none)"
@@ -306,36 +368,44 @@ func (c *coordinator) workflowTool(ctx context.Context) (fantasy.AgentTool, erro
 					}
 					logsStr = sb.String()
 				}
+
+				out := fmt.Sprintf("Workflow finished: %d agent(s) run.\n\nReturn value:\n```json\n%s\n```\n\nLogs:\n%s", result.AgentCount, valStr, logsStr)
+
 				return fantasy.WithResponseMetadata(
-					fantasy.NewTextErrorResponse(fmt.Sprintf("workflow failed: %v\n\nLogs:\n%s", err, logsStr)),
+					fantasy.NewTextResponse(out),
 					map[string]any{"agents": result.AgentCount, "logs": result.Logs},
 				), nil
 			}
 
-			var valStr string
-			if result.Value == "" {
-				valStr = "null"
-			} else {
-				valStr = result.Value
+			if !c.interactive {
+				// Headless (`crush run`) must not exit before the
+				// workflow finishes.
+				return execute(ctx)
 			}
 
-			logsStr := "(none)"
-			if len(result.Logs) > 0 {
-				var sb strings.Builder
-				for _, l := range result.Logs {
-					sb.WriteString("- ")
-					sb.WriteString(l)
-					sb.WriteString("\n")
+			job := &childjobs.Job{
+				Kind:            childjobs.KindWorkflow,
+				ParentSessionID: sessionID,
+				ToolCallID:      call.ID,
+				Title:           params.Description,
+			}
+			if err := childjobs.GetRegistry().Start(ctx, job, func(jobCtx context.Context) (string, error) {
+				resp, err := execute(jobCtx)
+				if err != nil {
+					return "", err
 				}
-				logsStr = sb.String()
+				if resp.IsError {
+					return "", errors.New(resp.Content)
+				}
+				return resp.Content, nil
+			}, func(j *childjobs.Job) {
+				c.deliverChildJobResult(j)
+			}); err != nil {
+				return fantasy.ToolResponse{}, err
 			}
-
-			out := fmt.Sprintf("Workflow finished: %d agent(s) run.\n\nReturn value:\n```json\n%s\n```\n\nLogs:\n%s", result.AgentCount, valStr, logsStr)
-
-			return fantasy.WithResponseMetadata(
-				fantasy.NewTextResponse(out),
-				map[string]any{"agents": result.AgentCount, "logs": result.Logs},
-			), nil
+			return fantasy.NewTextResponse(fmt.Sprintf(
+				"Workflow started in the background (job %s). Progress shows in the workflow popup; you will be notified with the final result - do not poll. Use job_kill to stop the whole workflow.",
+				job.ID)), nil
 		},
 	), nil
 }

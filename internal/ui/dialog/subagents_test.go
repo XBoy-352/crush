@@ -19,7 +19,7 @@ func newTestSubagents(t *testing.T, children []session.Session) *Subagents {
 	com := &common.Common{Styles: &s}
 	return NewSubagents(com, "parent", func(_ context.Context, _ string) ([]session.Session, error) {
 		return children, nil
-	})
+	}, nil)
 }
 
 func TestSubagents_ID(t *testing.T) {

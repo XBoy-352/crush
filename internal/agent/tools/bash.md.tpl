@@ -33,6 +33,7 @@ Common shell builtins and core utils available on Windows.
 - When a background job finishes you are notified automatically with its exit status and output tail — do NOT poll job_output in a loop, and do NOT wait on it; continue with other work and handle the notice when it arrives
 - Use job_output only to inspect a job before it finishes (e.g. a server's startup log); use job_kill to terminate one
 - IMPORTANT: NEVER use `&` at the end of commands to run in background - use run_in_background parameter instead
+- For dev servers, watch mode, long builds, and anything expected to exceed a minute, pass `run_in_background: true` up front instead of waiting for the auto-background threshold
 - Commands that should run in background:
   * Long-running servers (e.g., `npm start`, `python -m http.server`, `node server.js`)
   * Watch/monitoring tasks (e.g., `npm run watch`, `tail -f logfile`)

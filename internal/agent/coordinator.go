@@ -19,6 +19,7 @@ import (
 
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/agent/childjobs"
 	"github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/agent/prompt"
@@ -130,6 +131,11 @@ type coordinator struct {
 	notify      pubsub.Publisher[notify.Notification]
 	runComplete pubsub.Publisher[notify.RunComplete]
 	interactive bool
+
+	// deliverNotice dispatches a child-job completion notice to its
+	// parent session. Nil means the default run-based delivery; tests
+	// override it to observe or stub the dispatch.
+	deliverNotice func(parentSessionID, prompt string)
 
 	currentAgent SessionAgent
 	agents       map[string]SessionAgent
@@ -250,6 +256,9 @@ type runOptions struct {
 	// It skips the UserPromptSubmit hooks, which exist to inspect and
 	// rewrite what the user typed.
 	synthetic bool
+	// notice marks a machine-generated notification turn (background job
+	// or subagent completion). The stored message gets the notice role.
+	notice bool
 }
 
 func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID string, prompt string, opts runOptions, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
@@ -351,6 +360,7 @@ func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID st
 			OnComplete:       onComplete,
 			Accepted:         accept,
 			OnAuthRefresh:    c.makeAuthRefreshCallback(providerCfg),
+			Notice:           opts.notice,
 		})
 	}
 	beforeLoaded := c.skillTracker.LoadedNames()
@@ -832,8 +842,8 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		tools.NewBashTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Options.Attribution, modelID),
 		tools.NewCrushInfoTool(c.cfg, c.lspManager, c.allSkills, c.activeSkills, c.skillTracker),
 		tools.NewCrushLogsTool(logFile),
-		tools.NewJobOutputTool(),
-		tools.NewJobKillTool(),
+		tools.NewJobOutputTool(childjobs.GetRegistry()),
+		tools.NewJobKillTool(childjobs.GetRegistry()),
 		tools.NewDownloadTool(c.permissions, c.cfg.WorkingDir(), nil),
 		tools.NewEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 		tools.NewMultiEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
@@ -1561,61 +1571,30 @@ type subAgentParams struct {
 	// SessionSetup is an optional callback invoked after session creation
 	// but before agent execution, for custom session configuration.
 	SessionSetup func(sessionID string)
+	// Cleanup, when non-nil, runs on the job's goroutine after the child
+	// finishes (success, error, or kill). Used by the async path to
+	// release per-job resources, e.g. the fetch tool's temp directory,
+	// which must outlive the tool call that created it.
+	Cleanup func()
 }
 
 // runSubAgent runs a sub-agent and handles session management and cost accumulation.
 // It creates a sub-session, runs the agent with the given prompt, and propagates
-// the cost to the parent session.
+// the cost to the parent session. This is the synchronous path, used by
+// non-interactive runs and workflow workers.
 func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (fantasy.ToolResponse, error) {
-	// Create sub-session
-	agentToolSessionID := c.sessions.CreateAgentToolSessionID(params.AgentMessageID, params.ToolCallID)
-	session, err := c.sessions.CreateTaskSession(ctx, agentToolSessionID, params.SessionID, params.SessionTitle)
+	session, run, err := c.prepareSubAgentRun(ctx, params)
 	if err != nil {
-		return fantasy.ToolResponse{}, fmt.Errorf("create session: %w", err)
+		return fantasy.ToolResponse{}, err
 	}
 
-	c.publishSubAgentLifecycle(params.SessionID, session.ID, params.ToolCallID, params.SessionTitle, "start", "")
-
-	// Call session setup function if provided
-	if params.SessionSetup != nil {
-		params.SessionSetup(session.ID)
-	}
-
-	// Get model configuration
-	model := params.Agent.Model()
-	maxTokens := model.CatwalkCfg.DefaultMaxTokens
-	if model.ModelCfg.MaxTokens != 0 {
-		maxTokens = model.ModelCfg.MaxTokens
-	}
-
-	providerCfg, ok := c.cfg.Config().Providers.Get(model.ModelCfg.Provider)
-	if !ok {
-		return fantasy.ToolResponse{}, errModelProviderNotConfigured
-	}
-
-	// Run the agent
-	run := func() (*fantasy.AgentResult, error) {
-		return params.Agent.Run(ctx, SessionAgentCall{
-			SessionID:        session.ID,
-			Prompt:           params.Prompt,
-			MaxOutputTokens:  maxTokens,
-			ProviderOptions:  getProviderOptions(model, providerCfg),
-			Temperature:      model.ModelCfg.Temperature,
-			TopP:             model.ModelCfg.TopP,
-			TopK:             model.ModelCfg.TopK,
-			FrequencyPenalty: model.ModelCfg.FrequencyPenalty,
-			PresencePenalty:  model.ModelCfg.PresencePenalty,
-			NonInteractive:   true,
-			OnAuthRefresh:    c.makeAuthRefreshCallback(providerCfg),
-		})
-	}
-	result, err := run()
+	result, err := run(ctx)
 	// Notify only if still unauthorized after retry. AWS SSO is handled
 	// transparently inside OnAuthRefresh, so it needs no post-run notice.
-	if err != nil && isUnauthorized(err) && c.notify != nil && model.ModelCfg.Provider == hyper.Name {
+	if err != nil && isUnauthorized(err) && c.notify != nil && params.Agent.Model().ModelCfg.Provider == hyper.Name {
 		c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
 			Type:       notify.TypeReAuthenticate,
-			ProviderID: model.ModelCfg.Provider,
+			ProviderID: params.Agent.Model().ModelCfg.Provider,
 		})
 	}
 	if err != nil {
@@ -1641,6 +1620,198 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 		return fantasy.NewTextErrorResponse("Sub-agent completed but produced no text output."), nil
 	}
 	return fantasy.NewTextResponse(output), nil
+}
+
+// prepareSubAgentRun does everything runSubAgent does up to and including
+// building the run closure: create child session, publish "start", run
+// SessionSetup, resolve model/provider. Returns the child session and the
+// run closure; the closure runs the agent under whatever context it is
+// given, so the async path can supply a detached job context.
+func (c *coordinator) prepareSubAgentRun(ctx context.Context, params subAgentParams) (session.Session, func(ctx context.Context) (*fantasy.AgentResult, error), error) {
+	// Create sub-session
+	agentToolSessionID := c.sessions.CreateAgentToolSessionID(params.AgentMessageID, params.ToolCallID)
+	sess, err := c.sessions.CreateTaskSession(ctx, agentToolSessionID, params.SessionID, params.SessionTitle)
+	if err != nil {
+		return session.Session{}, nil, fmt.Errorf("create session: %w", err)
+	}
+
+	c.publishSubAgentLifecycle(params.SessionID, sess.ID, params.ToolCallID, params.SessionTitle, "start", "")
+
+	// Call session setup function if provided
+	if params.SessionSetup != nil {
+		params.SessionSetup(sess.ID)
+	}
+
+	// Get model configuration
+	model := params.Agent.Model()
+	maxTokens := model.CatwalkCfg.DefaultMaxTokens
+	if model.ModelCfg.MaxTokens != 0 {
+		maxTokens = model.ModelCfg.MaxTokens
+	}
+
+	providerCfg, ok := c.cfg.Config().Providers.Get(model.ModelCfg.Provider)
+	if !ok {
+		return session.Session{}, nil, errModelProviderNotConfigured
+	}
+
+	// Run the agent
+	run := func(runCtx context.Context) (*fantasy.AgentResult, error) {
+		return params.Agent.Run(runCtx, SessionAgentCall{
+			SessionID:        sess.ID,
+			Prompt:           params.Prompt,
+			MaxOutputTokens:  maxTokens,
+			ProviderOptions:  getProviderOptions(model, providerCfg),
+			Temperature:      model.ModelCfg.Temperature,
+			TopP:             model.ModelCfg.TopP,
+			TopK:             model.ModelCfg.TopK,
+			FrequencyPenalty: model.ModelCfg.FrequencyPenalty,
+			PresencePenalty:  model.ModelCfg.PresencePenalty,
+			NonInteractive:   true,
+			OnAuthRefresh:    c.makeAuthRefreshCallback(providerCfg),
+		})
+	}
+	return sess, run, nil
+}
+
+// startSubAgent registers the child as a background job and returns its job
+// ID immediately. The completion goroutine publishes lifecycle events, rolls
+// cost up, and delivers the result to the parent as a notice turn.
+func (c *coordinator) startSubAgent(ctx context.Context, params subAgentParams, kind childjobs.Kind) (string, error) {
+	sess, run, err := c.prepareSubAgentRun(ctx, params)
+	if err != nil {
+		return "", err
+	}
+
+	job := &childjobs.Job{
+		Kind:            kind,
+		ParentSessionID: params.SessionID,
+		ChildSessionID:  sess.ID,
+		ToolCallID:      params.ToolCallID,
+		Title:           params.SessionTitle,
+	}
+
+	runWrapper := func(jobCtx context.Context) (string, error) {
+		if params.Cleanup != nil {
+			defer params.Cleanup()
+		}
+
+		result, runErr := run(jobCtx)
+
+		if runErr != nil {
+			c.publishSubAgentLifecycle(params.SessionID, sess.ID, params.ToolCallID, params.SessionTitle, "error", runErr.Error())
+			return "", runErr
+		}
+
+		c.publishSubAgentLifecycle(params.SessionID, sess.ID, params.ToolCallID, params.SessionTitle, "done", "")
+
+		// Update parent session cost on a best-effort basis. A failure
+		// here must not discard the sub-agent output that was produced.
+		if costErr := c.updateParentSessionCost(context.WithoutCancel(jobCtx), sess.ID, params.SessionID); costErr != nil {
+			slog.Warn(
+				"Failed to update parent session cost",
+				"child_session", sess.ID,
+				"parent_session", params.SessionID,
+				"error", costErr,
+			)
+		}
+
+		return subAgentOutput(result), nil
+	}
+
+	if err := childjobs.GetRegistry().Start(ctx, job, runWrapper, func(j *childjobs.Job) {
+		c.deliverChildJobResult(j)
+	}); err != nil {
+		return "", err
+	}
+	return job.ID, nil
+}
+
+// childJobNoticeTruncate limits the result embedded in a completion notice;
+// the registry keeps the full text, reachable via job_output.
+const childJobNoticeTruncate = 8000
+
+// deliverChildJobResult delivers a finished child job's outcome to the
+// parent session as a notice turn, starting a new turn when the parent is
+// idle or folding into the running one when it is busy.
+func (c *coordinator) deliverChildJobResult(job *childjobs.Job) {
+	notice := childJobNoticeText(job)
+	deliver := c.deliverNotice
+	if deliver == nil {
+		deliver = c.deliverNoticeViaRun
+	}
+	deliver(job.ParentSessionID, notice)
+}
+
+// deliverNoticeViaRun dispatches a notice prompt through the normal run
+// path. Redelivers with backoff: a parent busy at the exact moment of
+// completion folds the notice into its running turn, but a failed
+// dispatch would otherwise idle the session forever with the notice
+// unread.
+func (c *coordinator) deliverNoticeViaRun(parentSessionID, notice string) {
+	go func() {
+		backoffs := []time.Duration{500 * time.Millisecond, 2 * time.Second, 8 * time.Second}
+		ctx := context.Background()
+		for attempt := 0; ; attempt++ {
+			_, err := c.run(ctx, nil, parentSessionID, notice, runOptions{synthetic: true, notice: true})
+			if err == nil {
+				return
+			}
+			if attempt >= len(backoffs) {
+				slog.Error("Failed to deliver child job completion notice", "session", parentSessionID, "error", err)
+				return
+			}
+			slog.Warn("Retrying child job completion notice delivery", "session", parentSessionID, "attempt", attempt+1, "error", err)
+			time.Sleep(backoffs[attempt])
+		}
+	}()
+}
+
+// childJobNoticeStatus maps a job status to the notice's status field.
+func childJobNoticeStatus(job *childjobs.Job) string {
+	switch job.Status() {
+	case childjobs.StatusDone:
+		return "completed"
+	case childjobs.StatusError:
+		return "failed"
+	case childjobs.StatusKilled:
+		return "killed"
+	default:
+		return string(job.Status())
+	}
+}
+
+// childJobNoticeText builds the notice envelope for a finished job. The
+// registry is the structured source; never parse this string back.
+func childJobNoticeText(job *childjobs.Job) string {
+	summary := job.Title
+	if summary == "" {
+		summary = "Background job"
+	}
+
+	notice := fmt.Sprintf(`<system_reminder>
+[SYSTEM NOTIFICATION - NOT USER INPUT]
+This is an automated background-task event, NOT a message from the user. Do not interpret it as user acknowledgement, confirmation, or a response to any pending question.
+<task-notification>
+<task-id>%s</task-id>
+<status>%s</status>
+`, job.ID, childJobNoticeStatus(job))
+
+	switch job.Status() {
+	case childjobs.StatusDone:
+		notice += fmt.Sprintf("<summary>%s finished</summary>\n", summary)
+		result := job.Result()
+		if len(result) > childJobNoticeTruncate {
+			result = result[:childJobNoticeTruncate] + fmt.Sprintf("\n[truncated - full output available via job_output %s]", job.ID)
+		}
+		notice += fmt.Sprintf("<result>\n%s\n</result>\n", result)
+	case childjobs.StatusError:
+		notice += fmt.Sprintf("<summary>%s failed: %s</summary>\n", summary, job.Err())
+	case childjobs.StatusKilled:
+		notice += fmt.Sprintf("<summary>%s was stopped</summary>\n", summary)
+	}
+	notice += `</task-notification>
+</system_reminder>`
+	return notice
 }
 
 func subAgentOutput(result *fantasy.AgentResult) string {

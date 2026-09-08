@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/agent/childjobs"
 	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/stretchr/testify/require"
 )
@@ -411,7 +412,7 @@ func TestJobOutputTool_ManualBackgroundRelease(t *testing.T) {
 	require.NoError(t, err)
 	defer bgManager.Kill(bgShell.ID)
 
-	tool := NewJobOutputTool()
+	tool := NewJobOutputTool(childjobs.GetRegistry())
 
 	type result struct {
 		resp fantasy.ToolResponse
