@@ -297,3 +297,39 @@ func TestListAndListByParent(t *testing.T) {
 	require.Len(t, list, 2)
 	require.True(t, list[0].StartedAt.Before(list[1].StartedAt) || list[0].StartedAt.Equal(list[1].StartedAt))
 }
+
+type ctxKey string
+
+func TestStartPreservesParentContextValues(t *testing.T) {
+	t.Parallel()
+	r := GetRegistry()
+	parent, cancel := context.WithCancel(context.WithValue(context.Background(), ctxKey("session"), "parent-sess"))
+	defer cancel()
+
+	got := make(chan string, 1)
+	job := testJob(t.Name())
+	require.NoError(t, r.Start(parent, job, func(ctx context.Context) (string, error) {
+		v, _ := ctx.Value(ctxKey("session")).(string)
+		got <- v
+		return "ok", nil
+	}, nil))
+	cancel() // parent cancel must not drop values or kill the job
+	select {
+	case v := <-got:
+		require.Equal(t, "parent-sess", v)
+	case <-time.After(time.Second):
+		t.Fatal("run never saw the parent context value")
+	}
+	require.Eventually(t, func() bool { return job.Done() }, time.Second, 5*time.Millisecond)
+	require.Equal(t, StatusDone, job.Status())
+}
+
+func TestWorkflowWorkerIDPrefix(t *testing.T) {
+	t.Parallel()
+	r := GetRegistry()
+	w := &Job{Kind: KindWorkflowWorker, ParentSessionID: t.Name(), Title: "worker"}
+	require.NoError(t, r.StartDetached(context.Background(), w, func(ctx context.Context) (string, error) {
+		return "ok", nil
+	}, nil))
+	require.True(t, strings.HasPrefix(w.ID, "wf-w-"))
+}

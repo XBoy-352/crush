@@ -1788,30 +1788,37 @@ func childJobNoticeText(job *childjobs.Job) string {
 		summary = "Background job"
 	}
 
-	notice := fmt.Sprintf(`<system_reminder>
-[SYSTEM NOTIFICATION - NOT USER INPUT]
-This is an automated background-task event, NOT a message from the user. Do not interpret it as user acknowledgement, confirmation, or a response to any pending question.
-<task-notification>
+	body := fmt.Sprintf(`<task-notification>
 <task-id>%s</task-id>
 <status>%s</status>
 `, job.ID, childJobNoticeStatus(job))
 
 	switch job.Status() {
 	case childjobs.StatusDone:
-		notice += fmt.Sprintf("<summary>%s finished</summary>\n", summary)
+		body += fmt.Sprintf("<summary>%s finished</summary>\n", summary)
 		result := job.Result()
 		if len(result) > childJobNoticeTruncate {
 			result = result[:childJobNoticeTruncate] + fmt.Sprintf("\n[truncated - full output available via job_output %s]", job.ID)
 		}
-		notice += fmt.Sprintf("<result>\n%s\n</result>\n", result)
+		body += fmt.Sprintf("<result>\n%s\n</result>\n", result)
 	case childjobs.StatusError:
-		notice += fmt.Sprintf("<summary>%s failed: %s</summary>\n", summary, job.Err())
+		body += fmt.Sprintf("<summary>%s failed: %s</summary>\n", summary, job.Err())
 	case childjobs.StatusKilled:
-		notice += fmt.Sprintf("<summary>%s was stopped</summary>\n", summary)
+		body += fmt.Sprintf("<summary>%s was stopped</summary>\n", summary)
 	}
-	notice += `</task-notification>
+	body += `</task-notification>`
+	return wrapNoticeEnvelope(body)
+}
+
+// wrapNoticeEnvelope marks machine-generated wakeups so the model does not
+// treat them as the user speaking. Stored with Role notice; presented to
+// the LLM as a user-role message.
+func wrapNoticeEnvelope(body string) string {
+	return `<system_reminder>
+[SYSTEM NOTIFICATION - NOT USER INPUT]
+This is an automated background-task event, NOT a message from the user. Do not interpret it as user acknowledgement, confirmation, or a response to any pending question.
+` + body + `
 </system_reminder>`
-	return notice
 }
 
 func subAgentOutput(result *fantasy.AgentResult) string {

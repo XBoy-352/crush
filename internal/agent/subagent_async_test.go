@@ -168,7 +168,13 @@ func TestToAIMessage_NoticeMapsToUserRole(t *testing.T) {
 }
 
 func TestHasUserTextMessage_ExcludesNotices(t *testing.T) {
-	// hasUserTextMessage only counts Role == User, so a notice-only
-	// history must not trigger title generation.
 	assert.False(t, hasUserTextMessage(nil))
+	assert.False(t, hasUserTextMessage([]message.Message{{
+		Role:  message.Notice,
+		Parts: []message.ContentPart{message.TextContent{Text: "job finished"}},
+	}}))
+	assert.True(t, hasUserTextMessage([]message.Message{{
+		Role:  message.User,
+		Parts: []message.ContentPart{message.TextContent{Text: "hello"}},
+	}}))
 }

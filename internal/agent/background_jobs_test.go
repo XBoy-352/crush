@@ -19,7 +19,7 @@ func waitForJobNotice(t *testing.T, coord *coordinator, sessionID string) messag
 		msgs, err := coord.messages.List(t.Context(), sessionID)
 		require.NoError(t, err)
 		for _, m := range msgs {
-			if m.Role == message.User && strings.Contains(m.Content().Text, "<background-job-finished") {
+			if m.Role == message.Notice && strings.Contains(m.Content().Text, "<background-job-finished") {
 				return m
 			}
 		}
@@ -47,7 +47,9 @@ func TestBackgroundJobCompletionWakesIdleAgent(t *testing.T) {
 	bgShell.MarkBackgrounded(sess.ID)
 
 	notice := waitForJobNotice(t, coord, sess.ID)
+	require.Equal(t, message.Notice, notice.Role)
 	text := notice.Content().Text
+	require.Contains(t, text, "[SYSTEM NOTIFICATION - NOT USER INPUT]")
 	require.Contains(t, text, bgShell.ID)
 	require.Contains(t, text, `status="failed"`)
 	require.Contains(t, text, "exit_code=2")

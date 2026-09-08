@@ -80,9 +80,9 @@ func (c *coordinator) deliverJobCompletions(ctx context.Context, sessionID strin
 		return
 	}
 
-	prompt := shell.FormatJobCompletions(completions)
+	prompt := wrapNoticeEnvelope(shell.FormatJobCompletions(completions))
 	go func() {
-		if _, err := c.run(ctx, nil, sessionID, prompt, runOptions{synthetic: true}); err != nil {
+		if _, err := c.run(ctx, nil, sessionID, prompt, runOptions{synthetic: true, notice: true}); err != nil {
 			slog.Error("Failed to deliver background job completion", "session", sessionID, "error", err)
 			shell.RestoreJobCompletions(completions)
 		}
