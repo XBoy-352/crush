@@ -72,6 +72,72 @@ func TestCurrentModelSupportsImages(t *testing.T) {
 		ui := newTestUIWithConfig(t, cfg)
 		require.True(t, ui.currentModelSupportsImages())
 	})
+
+	t.Run("returns true when only the small model supports images", func(t *testing.T) {
+		t.Parallel()
+
+		providers := csync.NewMap[string, config.ProviderConfig]()
+		providers.Set("test-provider", config.ProviderConfig{
+			ID: "test-provider",
+			Models: []catwalk.Model{
+				{ID: "large-model", SupportsImages: false},
+				{ID: "small-model", SupportsImages: true},
+			},
+		})
+
+		cfg := &config.Config{
+			Models: map[config.SelectedModelType]config.SelectedModel{
+				config.SelectedModelTypeLarge: {
+					Provider: "test-provider",
+					Model:    "large-model",
+				},
+				config.SelectedModelTypeSmall: {
+					Provider: "test-provider",
+					Model:    "small-model",
+				},
+			},
+			Providers: providers,
+			Agents: map[string]config.Agent{
+				config.AgentCoder: {Model: config.SelectedModelTypeLarge},
+			},
+		}
+
+		ui := newTestUIWithConfig(t, cfg)
+		require.True(t, ui.currentModelSupportsImages())
+	})
+
+	t.Run("returns false when neither model supports images", func(t *testing.T) {
+		t.Parallel()
+
+		providers := csync.NewMap[string, config.ProviderConfig]()
+		providers.Set("test-provider", config.ProviderConfig{
+			ID: "test-provider",
+			Models: []catwalk.Model{
+				{ID: "large-model", SupportsImages: false},
+				{ID: "small-model", SupportsImages: false},
+			},
+		})
+
+		cfg := &config.Config{
+			Models: map[config.SelectedModelType]config.SelectedModel{
+				config.SelectedModelTypeLarge: {
+					Provider: "test-provider",
+					Model:    "large-model",
+				},
+				config.SelectedModelTypeSmall: {
+					Provider: "test-provider",
+					Model:    "small-model",
+				},
+			},
+			Providers: providers,
+			Agents: map[string]config.Agent{
+				config.AgentCoder: {Model: config.SelectedModelTypeLarge},
+			},
+		}
+
+		ui := newTestUIWithConfig(t, cfg)
+		require.False(t, ui.currentModelSupportsImages())
+	})
 }
 
 func newTestUIWithConfig(t *testing.T, cfg *config.Config) *UI {
