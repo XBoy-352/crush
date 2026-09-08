@@ -642,6 +642,10 @@ func (c *Config) setDefaults(workingDir, dataDir string) {
 	}
 
 	c.Options.InitializeAs = cmp.Or(c.Options.InitializeAs, defaultInitializeAs)
+
+	// SearXNG's default bind is 127.0.0.1:8888 (settings.yml uwsgi socket
+	// behind the built-in development server).
+	c.Options.SearxngURL = cmp.Or(c.Options.SearxngURL, "http://localhost:8888")
 }
 
 // powernapDefaults caches the powernap default LSP server catalog. The

@@ -195,6 +195,10 @@ var optionSpecs = map[string]optionSpec{
 	"data-directory": {jsonKey: "data_directory", kind: optString},
 	"initialize-as":  {jsonKey: "initialize_as", kind: optString},
 
+	// Web search backends for the agentic_fetch sub-agent.
+	"web-search-engine": {jsonKey: "web_search_engine", kind: optString},
+	"searxng-url":       {jsonKey: "searxng_url", kind: optString},
+
 	// List fields. Keys are singular because each call appends one value.
 	"context-path":        {jsonKey: "context_paths", kind: optList},
 	"global-context-path": {jsonKey: "global_context_paths", kind: optList},

@@ -6,6 +6,7 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"charm.land/fantasy"
@@ -20,7 +21,10 @@ var webSearchDescriptionTpl = template.Must(
 )
 
 // NewWebSearchTool creates a web search tool for sub-agents (no permissions needed).
-func NewWebSearchTool(client *http.Client) fantasy.AgentTool {
+// When engine is "searxng", queries are sent to the SearXNG instance at
+// searxngURL, falling back to DuckDuckGo if the instance is unreachable.
+// Any other engine value uses DuckDuckGo directly.
+func NewWebSearchTool(client *http.Client, searxngURL, engine string) fantasy.AgentTool {
 	if client == nil {
 		transport := http.DefaultTransport.(*http.Transport).Clone()
 		transport.MaxIdleConns = 100
@@ -32,6 +36,8 @@ func NewWebSearchTool(client *http.Client) fantasy.AgentTool {
 			Transport: transport,
 		}
 	}
+
+	useSearxng := strings.EqualFold(engine, "searxng") && strings.TrimSpace(searxngURL) != ""
 
 	return fantasy.NewParallelAgentTool(
 		WebSearchToolName,
@@ -49,8 +55,24 @@ func NewWebSearchTool(client *http.Client) fantasy.AgentTool {
 				maxResults = 20
 			}
 
-			maybeDelaySearch()
-			results, err := searchDuckDuckGo(ctx, client, params.Query, maxResults)
+			var (
+				results []SearchResult
+				err     error
+			)
+			switch {
+			case useSearxng:
+				results, err = searchSearXNG(ctx, client, searxngURL, params.Query, maxResults)
+				if err != nil {
+					// The configured instance is unavailable; fall
+					// back to DuckDuckGo instead of failing the call.
+					slog.Warn("SearXNG search failed, falling back to DuckDuckGo", "url", searxngURL, "error", err)
+					maybeDelaySearch()
+					results, err = searchDuckDuckGo(ctx, client, params.Query, maxResults)
+				}
+			default:
+				maybeDelaySearch()
+				results, err = searchDuckDuckGo(ctx, client, params.Query, maxResults)
+			}
 			slog.Debug("Web search completed", "query", params.Query, "results", len(results), "err", err)
 			if err != nil {
 				return fantasy.NewTextErrorResponse("Failed to search: " + err.Error()), nil

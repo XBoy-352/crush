@@ -53,6 +53,9 @@ type (
 	ActionTogglePills       struct{}
 	ActionExternalEditor    struct{}
 	ActionToggleYoloMode    struct{}
+	// ActionToggleSearchEngine cycles the web search backend used by
+	// agentic_fetch between SearXNG and DuckDuckGo.
+	ActionToggleSearchEngine struct{}
 	// ActionTogglePlanMode toggles plan mode on/off.
 	ActionTogglePlanMode struct{}
 	// ActionToggleRemoteControl enables or disables remote control for
