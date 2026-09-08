@@ -26,6 +26,7 @@ import (
 	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/client"
+	"github.com/charmbracelet/crush/internal/clipboard"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/event"
@@ -119,6 +120,12 @@ crush --continue
 			return err
 		}
 		defer cleanup()
+
+		// The TUI reads and writes the clipboard in whichever process renders
+		// it, which in client/server mode is the client, not the app host.
+		if err := clipboard.Init(); err != nil {
+			slog.Warn("Clipboard initialization failed", "error", err)
+		}
 
 		if sessionID != "" {
 			sess, err := resolveWorkspaceSessionID(cmd.Context(), ws, sessionID)
